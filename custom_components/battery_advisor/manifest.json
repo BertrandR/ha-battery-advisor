@@ -1,0 +1,11 @@
+{
+  "domain": "battery_advisor",
+  "name": "Battery Dispatch Advisor",
+  "version": "1.0.0",
+  "documentation": "https://github.com/yourusername/ha-battery-advisor",
+  "issue_tracker": "https://github.com/yourusername/ha-battery-advisor/issues",
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "cloud_polling",
+  "config_flow": true
+}

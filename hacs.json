@@ -1,0 +1,7 @@
+{
+  "name": "Battery Dispatch Advisor",
+  "description": "Optimal home battery charge/discharge scheduling using ENTSO-E day-ahead prices. Supports Nordpool, Zonneplan, Tibber and Zendure.",
+  "render_readme": true,
+  "homeassistant": "2023.6.0",
+  "iot_class": "local_push"
+}

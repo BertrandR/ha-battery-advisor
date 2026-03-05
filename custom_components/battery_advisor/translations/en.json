@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery Dispatch Advisor",
+        "description": "Select your electricity price sensor and configure your battery. Zendure entities are optional \u2014 when provided, limits and SoC are read live from your device to improve schedule accuracy. The integration never writes to your device.",
+        "data": {
+          "price_entity_id": "Electricity price sensor",
+          "capacity": "Battery capacity (kWh)",
+          "power": "Max charge/discharge power (kW) \u2014 fallback if Zendure not set",
+          "min_soc": "Min SoC % \u2014 fallback if Zendure not set",
+          "max_soc": "Max SoC % \u2014 fallback if Zendure not set",
+          "min_profit": "Minimum cycle profit (EUR) \u2014 skip cycles below this",
+          "zendure_soc_entity": "[Zendure] SoC sensor (e.g. sensor.hyper_2000_electric_level)",
+          "zendure_soc_min_entity": "[Zendure] Min SoC number (e.g. number.hyper_2000_min_soc)",
+          "zendure_soc_max_entity": "[Zendure] Max SoC number (e.g. number.hyper_2000_soc_set)",
+          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number (e.g. number.hyper_2000_inverse_max_power)"
+        }
+      }
+    },
+    "error": {
+      "soc_range_invalid": "Min SoC must be lower than Max SoC."
+    },
+    "abort": {
+      "already_configured": "This price sensor is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Update Battery Advisor Settings",
+        "data": {
+          "price_entity_id": "Electricity price sensor",
+          "capacity": "Battery capacity (kWh)",
+          "power": "Max charge/discharge power (kW) \u2014 fallback if Zendure not set",
+          "min_soc": "Min SoC % \u2014 fallback if Zendure not set",
+          "max_soc": "Max SoC % \u2014 fallback if Zendure not set",
+          "min_profit": "Minimum cycle profit (EUR)",
+          "zendure_soc_entity": "[Zendure] SoC sensor",
+          "zendure_soc_min_entity": "[Zendure] Min SoC number",
+          "zendure_soc_max_entity": "[Zendure] Max SoC number",
+          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number"
+        }
+      }
+    },
+    "error": {
+      "soc_range_invalid": "Min SoC must be lower than Max SoC."
+    }
+  }
+}
