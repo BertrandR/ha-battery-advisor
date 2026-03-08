@@ -14,22 +14,26 @@ from .const import (
     DEFAULT_CAPACITY, DEFAULT_POWER, DEFAULT_MIN_SOC, DEFAULT_MAX_SOC, DEFAULT_MIN_PROFIT,
 )
 
-_SENSOR_SEL = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
-_NUMBER_SEL = selector.EntitySelector(selector.EntitySelectorConfig(domain="number"))
+_SENSOR_SEL     = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
+_NUMBER_SEL     = selector.EntitySelector(selector.EntitySelectorConfig(domain="number"))
+_OPT_SENSOR_SEL = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", multiple=False))
+_OPT_NUMBER_SEL = selector.EntitySelector(selector.EntitySelectorConfig(domain="number", multiple=False))
 
 
 def _schema(d: dict) -> vol.Schema:
     return vol.Schema({
-        vol.Required(CONF_PRICE_ENTITY,  default=d.get(CONF_PRICE_ENTITY,  "")): _SENSOR_SEL,
-        vol.Required(CONF_CAPACITY,      default=d.get(CONF_CAPACITY,      DEFAULT_CAPACITY)):  vol.Coerce(float),
-        vol.Required(CONF_POWER,         default=d.get(CONF_POWER,         DEFAULT_POWER)):     vol.Coerce(float),
-        vol.Required(CONF_MIN_SOC,       default=d.get(CONF_MIN_SOC,       DEFAULT_MIN_SOC)):   vol.All(int, vol.Range(min=0,  max=49)),
-        vol.Required(CONF_MAX_SOC,       default=d.get(CONF_MAX_SOC,       DEFAULT_MAX_SOC)):   vol.All(int, vol.Range(min=51, max=100)),
-        vol.Required(CONF_MIN_PROFIT,    default=d.get(CONF_MIN_PROFIT,    DEFAULT_MIN_PROFIT)): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
-        vol.Optional(CONF_ZEN_SOC,       default=d.get(CONF_ZEN_SOC,       "")): _SENSOR_SEL,
-        vol.Optional(CONF_ZEN_SOC_MIN,   default=d.get(CONF_ZEN_SOC_MIN,   "")): _NUMBER_SEL,
-        vol.Optional(CONF_ZEN_SOC_MAX,   default=d.get(CONF_ZEN_SOC_MAX,   "")): _NUMBER_SEL,
-        vol.Optional(CONF_ZEN_INVERSE_MAX_POWER, default=d.get(CONF_ZEN_INVERSE_MAX_POWER, "")): _NUMBER_SEL,
+        # ── Required ──────────────────────────────────────────────────────────
+        vol.Required(CONF_PRICE_ENTITY, default=d.get(CONF_PRICE_ENTITY, "")): _SENSOR_SEL,
+        vol.Required(CONF_CAPACITY,     default=d.get(CONF_CAPACITY,  DEFAULT_CAPACITY)):  vol.Coerce(float),
+        vol.Required(CONF_POWER,        default=d.get(CONF_POWER,     DEFAULT_POWER)):     vol.Coerce(float),
+        vol.Required(CONF_MIN_SOC,      default=d.get(CONF_MIN_SOC,   DEFAULT_MIN_SOC)):   vol.All(int, vol.Range(min=0,  max=49)),
+        vol.Required(CONF_MAX_SOC,      default=d.get(CONF_MAX_SOC,   DEFAULT_MAX_SOC)):   vol.All(int, vol.Range(min=51, max=100)),
+        vol.Required(CONF_MIN_PROFIT,   default=d.get(CONF_MIN_PROFIT, DEFAULT_MIN_PROFIT)): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+        # ── Zendure (all optional — leave blank to disable) ───────────────────
+        vol.Optional(CONF_ZEN_SOC):              _OPT_SENSOR_SEL,
+        vol.Optional(CONF_ZEN_SOC_MIN):          _OPT_NUMBER_SEL,
+        vol.Optional(CONF_ZEN_SOC_MAX):          _OPT_NUMBER_SEL,
+        vol.Optional(CONF_ZEN_INVERSE_MAX_POWER): _OPT_SENSOR_SEL,  # sensor, not number
     })
 
 
