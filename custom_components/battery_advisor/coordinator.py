@@ -238,6 +238,14 @@ def _to_eur_mwh(value: float, attrs: dict) -> float:
 # Optimisation algorithm — Dynamic Programming
 # ---------------------------------------------------------------------------
 
+def _soc_to_idx(soc_kwh: float, soc_min_kwh: float, step: float) -> int:
+    """Convert a SoC value to the nearest grid index. No rounding error accumulation."""
+    return max(0, round((soc_kwh - soc_min_kwh) / step))
+
+def _idx_to_soc(idx: int, soc_min_kwh: float, step: float) -> float:
+    return soc_min_kwh + idx * step
+
+
 def _optimize_schedule(
     prices: list[dict],
     capacity: float,
@@ -250,18 +258,20 @@ def _optimize_schedule(
     """
     Globally optimal charge/discharge schedule via backward dynamic programming.
 
-    State space : (hour t, discrete SoC index s)
-    Transition  : CHARGE adds min(power, headroom) kWh
-                  DISCHARGE removes min(power, available) kWh
-                  IDLE keeps SoC constant
-    Objective   : maximise total revenue(discharge) − cost(charge)
+    State space  : (hour t, SoC grid index s)
+    Grid spacing : SOC_STEP_KWH — fixed 0.5 kWh steps so that power transitions
+                   always land exactly on a grid point (power is rounded to the
+                   nearest 0.5 kWh before the DP runs).
+    Transitions  : CHARGE  — move up   min(power_rounded, N-1-s) steps
+                   DISCHARGE — move down min(power_rounded, s) steps
+                   IDLE    — stay at s
+    Objective    : maximise Σ revenue(discharge) − Σ cost(charge)
 
-    initial_soc_pct : if provided (e.g. from Zendure), the forward pass starts
-                      from this SoC rather than the minimum, giving a more
-                      accurate schedule for the remaining hours of today.
+    initial_soc_pct : when provided (e.g. from Zendure live SoC), the forward
+                      pass starts from the actual current SoC rather than min_soc.
 
-    After finding the optimal path, _apply_min_profit_filter suppresses any
-    charge→discharge cycle whose net profit < min_profit_eur back to IDLE.
+    After the DP, _apply_min_profit_filter suppresses any charge→discharge cycle
+    whose actual net profit is below min_profit_eur.
     """
     if not prices:
         return []
@@ -269,77 +279,91 @@ def _optimize_schedule(
     T = len(prices)
     soc_min_kwh = capacity * min_soc / 100.0
     soc_max_kwh = capacity * max_soc / 100.0
+    usable_kwh  = soc_max_kwh - soc_min_kwh
 
-    n_steps  = max(1, round((soc_max_kwh - soc_min_kwh) / SOC_STEP_KWH))
-    soc_grid = [soc_min_kwh + i * (soc_max_kwh - soc_min_kwh) / n_steps for i in range(n_steps + 1)]
-    N = len(soc_grid)
+    if usable_kwh < 0.01:
+        _LOGGER.warning("Usable capacity is near zero (min_soc=%d max_soc=%d) — all IDLE", min_soc, max_soc)
+        return [{**p, "action": ACTION_IDLE} for p in prices]
+
+    # Round power to the nearest grid step so charge/discharge transitions
+    # always land exactly on a grid point — eliminates quantisation drift.
+    step = SOC_STEP_KWH
+    power_steps = max(1, round(power / step))          # steps per hour
+    power_kwh   = power_steps * step                   # actual kWh per charge hour
+
+    N = max(2, round(usable_kwh / step)) + 1           # number of grid points
+    # Recompute step to span exactly [soc_min, soc_max] in N-1 equal intervals
+    step = usable_kwh / (N - 1)
+    power_steps = max(1, round(power_kwh / step))
+    power_kwh   = power_steps * step
 
     price_eur_kwh = [p["price"] / 1000.0 for p in prices]
-    NEG_INF = float("-inf")
 
-    value  = [[NEG_INF] * N for _ in range(T + 1)]
-    action = [[ACTION_IDLE] * N for _ in range(T)]
+    # ── Backward induction ────────────────────────────────────────────────────
+    # value[t][s] = best achievable profit from hour t onward starting at index s
+    # We use flat lists for speed.
+    INF = float("inf")
 
-    for s in range(N):
-        value[T][s] = 0.0
+    # Terminal condition: all states have value 0 at T
+    val_next = [0.0] * N
+    # Store best action per (t, s)
+    policy = [[ACTION_IDLE] * N for _ in range(T)]
 
     for t in range(T - 1, -1, -1):
         p = price_eur_kwh[t]
+        val_cur = [0.0] * N
+
         for s in range(N):
-            soc = soc_grid[s]
-            best_val, best_act = NEG_INF, ACTION_IDLE
-
             # IDLE
-            fut = value[t + 1][s]
-            if fut > best_val:
-                best_val, best_act = fut, ACTION_IDLE
+            best_val  = val_next[s]
+            best_act  = ACTION_IDLE
 
-            # CHARGE
-            kwh_in = min(power, soc_max_kwh - soc)
-            if kwh_in > 1e-6:
-                new_soc = soc + kwh_in
-                ns = min(N - 1, round((new_soc - soc_min_kwh) / (soc_max_kwh - soc_min_kwh) * n_steps))
-                fc = value[t + 1][ns]
-                if fc != NEG_INF:
-                    vc = -p * kwh_in + fc
-                    if vc > best_val:
-                        best_val, best_act = vc, ACTION_CHARGE
+            # CHARGE: move up power_steps (capped at top of grid)
+            steps_up = min(power_steps, N - 1 - s)
+            if steps_up > 0:
+                kwh_in = steps_up * step
+                v = -p * kwh_in + val_next[s + steps_up]
+                if v > best_val:
+                    best_val, best_act = v, ACTION_CHARGE
 
-            # DISCHARGE
-            kwh_out = min(power, soc - soc_min_kwh)
-            if kwh_out > 1e-6:
-                new_soc = soc - kwh_out
-                ns = max(0, round((new_soc - soc_min_kwh) / (soc_max_kwh - soc_min_kwh) * n_steps))
-                fd = value[t + 1][ns]
-                if fd != NEG_INF:
-                    vd = p * kwh_out + fd
-                    if vd > best_val:
-                        best_val, best_act = vd, ACTION_DISCHARGE
+            # DISCHARGE: move down power_steps (capped at bottom of grid)
+            steps_dn = min(power_steps, s)
+            if steps_dn > 0:
+                kwh_out = steps_dn * step
+                v = p * kwh_out + val_next[s - steps_dn]
+                if v > best_val:
+                    best_val, best_act = v, ACTION_DISCHARGE
 
-            value[t][s] = best_val if best_val != NEG_INF else 0.0
-            action[t][s] = best_act
+            val_cur[s]    = best_val
+            policy[t][s]  = best_act
 
-    # Forward pass — start from initial_soc_pct if provided, else min_soc
+        val_next = val_cur
+
+    # ── Forward pass — follow policy from starting SoC ────────────────────────
+    # Use exact SoC tracking (float), snap to nearest grid index each step.
     if initial_soc_pct is not None:
-        init_soc_kwh = capacity * max(min_soc, min(max_soc, float(initial_soc_pct))) / 100.0
-        s = min(N - 1, round((init_soc_kwh - soc_min_kwh) / (soc_max_kwh - soc_min_kwh) * n_steps))
+        init_kwh = capacity * max(float(min_soc), min(float(max_soc), float(initial_soc_pct))) / 100.0
     else:
-        s = 0
-    soc = soc_grid[s]
+        init_kwh = soc_min_kwh
+
+    soc_kwh = init_kwh
     raw_actions: list[str] = []
 
     for t in range(T):
-        act = action[t][s]
+        s   = min(N - 1, max(0, round((soc_kwh - soc_min_kwh) / step)))
+        act = policy[t][s]
         raw_actions.append(act)
+
         if act == ACTION_CHARGE:
-            soc += min(power, soc_max_kwh - soc)
+            steps_up = min(power_steps, N - 1 - s)
+            soc_kwh  = min(soc_max_kwh, soc_kwh + steps_up * step)
         elif act == ACTION_DISCHARGE:
-            soc -= min(power, soc - soc_min_kwh)
-        s = min(N - 1, round((soc - soc_min_kwh) / (soc_max_kwh - soc_min_kwh) * n_steps))
+            steps_dn = min(power_steps, s)
+            soc_kwh  = max(soc_min_kwh, soc_kwh - steps_dn * step)
 
     if min_profit_eur > 0.0:
         raw_actions = _apply_min_profit_filter(
-            raw_actions, price_eur_kwh, power, min_profit_eur, soc_min_kwh, soc_max_kwh
+            raw_actions, price_eur_kwh, power_kwh, min_profit_eur,
         )
 
     return [{**prices[t], "action": raw_actions[t]} for t in range(T)]
@@ -348,12 +372,16 @@ def _optimize_schedule(
 def _apply_min_profit_filter(
     actions: list[str],
     price_eur_kwh: list[float],
-    power: float,
+    power_kwh: float,
     min_profit_eur: float,
-    soc_min_kwh: float,
-    soc_max_kwh: float,
 ) -> list[str]:
-    """Suppress charge→discharge cycles whose net profit is below threshold."""
+    """
+    Suppress charge→discharge cycles whose net profit is below min_profit_eur.
+
+    Pairs each charge block with the next discharge block chronologically,
+    computes actual energy-weighted profit, and sets both blocks to IDLE if
+    the profit is below the threshold.
+    """
     T = len(actions)
 
     def get_blocks(target: str) -> list[tuple[int, int]]:
@@ -376,6 +404,7 @@ def _apply_min_profit_filter(
     suppress: set[int] = set()
 
     for cb_start, cb_end in charge_blocks:
+        # Find the next unpaired discharge block after this charge block
         match = None
         for idx, (db_start, db_end) in enumerate(discharge_blocks):
             if db_start >= cb_end and idx not in used_discharge:
@@ -383,23 +412,21 @@ def _apply_min_profit_filter(
                 break
 
         if match is None:
-            for h in range(cb_start, cb_end):
-                suppress.add(h)
+            # No discharge follows this charge — suppress it
+            suppress.update(range(cb_start, cb_end))
             continue
 
         didx, db_start, db_end = match
-        usable        = soc_max_kwh - soc_min_kwh
-        charge_kwh    = min(power, usable) * (cb_end - cb_start)
-        discharge_kwh = min(power, usable) * (db_end - db_start)
-        avg_cp = sum(price_eur_kwh[h] for h in range(cb_start, cb_end)) / (cb_end - cb_start)
-        avg_dp = sum(price_eur_kwh[h] for h in range(db_start, db_end)) / (db_end - db_start)
-        profit = avg_dp * discharge_kwh - avg_cp * charge_kwh
+
+        charge_kwh    = power_kwh * (cb_end - cb_start)
+        discharge_kwh = power_kwh * (db_end - db_start)
+        avg_buy  = sum(price_eur_kwh[h] for h in range(cb_start, cb_end)) / (cb_end - cb_start)
+        avg_sell = sum(price_eur_kwh[h] for h in range(db_start, db_end)) / (db_end - db_start)
+        profit   = avg_sell * discharge_kwh - avg_buy * charge_kwh
 
         if profit < min_profit_eur:
-            for h in range(cb_start, cb_end):
-                suppress.add(h)
-            for h in range(db_start, db_end):
-                suppress.add(h)
+            suppress.update(range(cb_start, cb_end))
+            suppress.update(range(db_start, db_end))
         else:
             used_discharge.add(didx)
 
