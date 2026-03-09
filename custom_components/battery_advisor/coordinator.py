@@ -19,7 +19,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-SOC_STEP_KWH = 0.5
+SOC_STEP_KWH = 0.2  # 0.2 kWh gives exact representation of common power values (e.g. 2.4, 3.6 kW)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +348,7 @@ def _optimize_schedule(
 
     soc_kwh = init_kwh
     raw_actions: list[str] = []
+    raw_kwh: list[float] = []      # actual kWh moved each slot (may be < power_kwh at SoC limits)
 
     for t in range(T):
         s   = min(N - 1, max(0, round((soc_kwh - soc_min_kwh) / step)))
@@ -356,26 +357,35 @@ def _optimize_schedule(
 
         if act == ACTION_CHARGE:
             steps_up = min(power_steps, N - 1 - s)
-            soc_kwh  = min(soc_max_kwh, soc_kwh + steps_up * step)
+            kwh      = steps_up * step
+            soc_kwh  = min(soc_max_kwh, soc_kwh + kwh)
+            raw_kwh.append(round(kwh, 3))
         elif act == ACTION_DISCHARGE:
             steps_dn = min(power_steps, s)
-            soc_kwh  = max(soc_min_kwh, soc_kwh - steps_dn * step)
+            kwh      = steps_dn * step
+            soc_kwh  = max(soc_min_kwh, soc_kwh - kwh)
+            raw_kwh.append(round(kwh, 3))
+        else:
+            raw_kwh.append(0.0)
 
     if min_profit_eur > 0.0:
-        raw_actions = _apply_min_profit_filter(
-            raw_actions, price_eur_kwh, power_kwh, min_profit_eur, usable_kwh,
+        raw_actions, raw_kwh = _apply_min_profit_filter(
+            raw_actions, raw_kwh, price_eur_kwh, power_kwh, min_profit_eur, usable_kwh,
         )
 
-    return [{**prices[t], "action": raw_actions[t]} for t in range(T)]
+    return [{**prices[t], "action": raw_actions[t], "kwh": raw_kwh[t],
+             "partial": raw_actions[t] != ACTION_IDLE and raw_kwh[t] < power_kwh - 0.01}
+            for t in range(T)]
 
 
 def _apply_min_profit_filter(
     actions: list[str],
+    kwh: list[float],
     price_eur_kwh: list[float],
     power_kwh: float,
     min_profit_eur_per_kwh: float,
     usable_kwh: float,
-) -> list[str]:
+) -> tuple[list[str], list[float]]:
     """
     Suppress cycles whose price spread is below min_profit_eur_per_kwh.
 
@@ -495,10 +505,12 @@ def _apply_min_profit_filter(
         else:
             used_charge.add(cidx)
 
-    result = list(actions)
+    result_actions = list(actions)
+    result_kwh     = list(kwh)
     for h in suppress:
-        result[h] = ACTION_IDLE
-    return result
+        result_actions[h] = ACTION_IDLE
+        result_kwh[h]     = 0.0
+    return result_actions, result_kwh
 
 
 def _calc_savings(schedule: list[dict], power: float) -> dict:
