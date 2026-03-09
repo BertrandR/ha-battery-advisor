@@ -377,13 +377,20 @@ def _apply_min_profit_filter(
     usable_kwh: float,
 ) -> list[str]:
     """
-    Suppress charge→discharge cycles whose net spread is below min_profit_eur_per_kwh.
+    Suppress cycles whose price spread is below min_profit_eur_per_kwh.
 
-    Threshold is in EUR/kWh (price spread), making it independent of battery
-    size and block length — a value of 0.05 means "only cycle if sell price
-    exceeds buy price by at least 5 ct/kWh".
+    Handles both directions:
+      charge → discharge  (normal arbitrage: buy cheap, sell expensive)
+      discharge → charge  (partial cycle: sell then immediately rebuy at lower price)
 
-    profit_per_kwh = avg_sell_price - avg_buy_price
+    For each charge block, finds the next discharge block and checks:
+      spread = avg_sell - avg_buy  (EUR/kWh)
+
+    For each discharge block, finds the next charge block and checks:
+      spread = avg_discharge - avg_charge  (EUR/kWh)
+
+    Both directions must exceed the threshold to be kept.
+    Suppression sets the offending hours back to IDLE.
     """
     T = len(actions)
 
@@ -400,11 +407,15 @@ def _apply_min_profit_filter(
                 i += 1
         return blocks
 
+    def avg_price(start, end):
+        return sum(price_eur_kwh[h] for h in range(start, end)) / (end - start)
+
+    suppress: set[int] = set()
+
+    # ── Pass 1: charge → discharge pairs ─────────────────────────────────────
     charge_blocks    = get_blocks(ACTION_CHARGE)
     discharge_blocks = get_blocks(ACTION_DISCHARGE)
-
     used_discharge: set[int] = set()
-    suppress: set[int] = set()
 
     for cb_start, cb_end in charge_blocks:
         match = None
@@ -418,14 +429,12 @@ def _apply_min_profit_filter(
             continue
 
         didx, db_start, db_end = match
-
-        avg_buy  = sum(price_eur_kwh[h] for h in range(cb_start, cb_end)) / (cb_end - cb_start)
-        avg_sell = sum(price_eur_kwh[h] for h in range(db_start, db_end)) / (db_end - db_start)
-        spread   = avg_sell - avg_buy   # EUR/kWh
+        spread = avg_price(db_start, db_end) - avg_price(cb_start, cb_end)
 
         _LOGGER.debug(
-            "Cycle spread check: buy=%.4f sell=%.4f spread=%.4f vs min=%.4f EUR/kWh",
-            avg_buy, avg_sell, spread, min_profit_eur_per_kwh,
+            "charge→discharge: buy=%.4f sell=%.4f spread=%.4f vs min=%.4f EUR/kWh",
+            avg_price(cb_start, cb_end), avg_price(db_start, db_end),
+            spread, min_profit_eur_per_kwh,
         )
 
         if spread < min_profit_eur_per_kwh:
@@ -433,6 +442,58 @@ def _apply_min_profit_filter(
             suppress.update(range(db_start, db_end))
         else:
             used_discharge.add(didx)
+
+    # ── Pass 2: discharge → charge pairs (partial re-charge micro-cycles) ────
+    # Re-read blocks from current (possibly already partially suppressed) actions
+    # so that Pass 1 suppressions are taken into account.
+    working = list(actions)
+    for h in suppress:
+        working[h] = ACTION_IDLE
+
+    discharge_blocks2 = get_blocks(ACTION_DISCHARGE)  # uses original `actions` closure
+    # rebuild from working copy
+    def get_blocks_from(acts, target):
+        blocks, i = [], 0
+        while i < T:
+            if acts[i] == target:
+                j = i
+                while j < T and acts[j] == target:
+                    j += 1
+                blocks.append((i, j))
+                i = j
+            else:
+                i += 1
+        return blocks
+
+    discharge_blocks2 = get_blocks_from(working, ACTION_DISCHARGE)
+    charge_blocks2    = get_blocks_from(working, ACTION_CHARGE)
+    used_charge: set[int] = set()
+
+    for db_start, db_end in discharge_blocks2:
+        # Find the next charge block after this discharge block
+        match = None
+        for idx, (cb_start, cb_end) in enumerate(charge_blocks2):
+            if cb_start >= db_end and idx not in used_charge:
+                match = (idx, cb_start, cb_end)
+                break
+
+        if match is None:
+            continue  # discharge with no following charge is fine (end of day)
+
+        cidx, cb_start, cb_end = match
+        spread = avg_price(db_start, db_end) - avg_price(cb_start, cb_end)
+
+        _LOGGER.debug(
+            "discharge→charge: discharge=%.4f recharge=%.4f spread=%.4f vs min=%.4f EUR/kWh",
+            avg_price(db_start, db_end), avg_price(cb_start, cb_end),
+            spread, min_profit_eur_per_kwh,
+        )
+
+        if spread < min_profit_eur_per_kwh:
+            suppress.update(range(db_start, db_end))
+            suppress.update(range(cb_start, cb_end))
+        else:
+            used_charge.add(cidx)
 
     result = list(actions)
     for h in suppress:
