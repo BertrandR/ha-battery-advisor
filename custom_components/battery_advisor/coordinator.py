@@ -363,7 +363,7 @@ def _optimize_schedule(
 
     if min_profit_eur > 0.0:
         raw_actions = _apply_min_profit_filter(
-            raw_actions, price_eur_kwh, power_kwh, min_profit_eur,
+            raw_actions, price_eur_kwh, power_kwh, min_profit_eur, usable_kwh,
         )
 
     return [{**prices[t], "action": raw_actions[t]} for t in range(T)]
@@ -373,14 +373,17 @@ def _apply_min_profit_filter(
     actions: list[str],
     price_eur_kwh: list[float],
     power_kwh: float,
-    min_profit_eur: float,
+    min_profit_eur_per_kwh: float,
+    usable_kwh: float,
 ) -> list[str]:
     """
-    Suppress charge→discharge cycles whose net profit is below min_profit_eur.
+    Suppress charge→discharge cycles whose net spread is below min_profit_eur_per_kwh.
 
-    Pairs each charge block with the next discharge block chronologically,
-    computes actual energy-weighted profit, and sets both blocks to IDLE if
-    the profit is below the threshold.
+    Threshold is in EUR/kWh (price spread), making it independent of battery
+    size and block length — a value of 0.05 means "only cycle if sell price
+    exceeds buy price by at least 5 ct/kWh".
+
+    profit_per_kwh = avg_sell_price - avg_buy_price
     """
     T = len(actions)
 
@@ -404,7 +407,6 @@ def _apply_min_profit_filter(
     suppress: set[int] = set()
 
     for cb_start, cb_end in charge_blocks:
-        # Find the next unpaired discharge block after this charge block
         match = None
         for idx, (db_start, db_end) in enumerate(discharge_blocks):
             if db_start >= cb_end and idx not in used_discharge:
@@ -412,19 +414,21 @@ def _apply_min_profit_filter(
                 break
 
         if match is None:
-            # No discharge follows this charge — suppress it
             suppress.update(range(cb_start, cb_end))
             continue
 
         didx, db_start, db_end = match
 
-        charge_kwh    = power_kwh * (cb_end - cb_start)
-        discharge_kwh = power_kwh * (db_end - db_start)
         avg_buy  = sum(price_eur_kwh[h] for h in range(cb_start, cb_end)) / (cb_end - cb_start)
         avg_sell = sum(price_eur_kwh[h] for h in range(db_start, db_end)) / (db_end - db_start)
-        profit   = avg_sell * discharge_kwh - avg_buy * charge_kwh
+        spread   = avg_sell - avg_buy   # EUR/kWh
 
-        if profit < min_profit_eur:
+        _LOGGER.debug(
+            "Cycle spread check: buy=%.4f sell=%.4f spread=%.4f vs min=%.4f EUR/kWh",
+            avg_buy, avg_sell, spread, min_profit_eur_per_kwh,
+        )
+
+        if spread < min_profit_eur_per_kwh:
             suppress.update(range(cb_start, cb_end))
             suppress.update(range(db_start, db_end))
         else:

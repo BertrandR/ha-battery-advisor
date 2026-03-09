@@ -23,7 +23,7 @@ DEFAULT_CAPACITY    = 10.0
 DEFAULT_POWER       = 3.0
 DEFAULT_MIN_SOC     = 10
 DEFAULT_MAX_SOC     = 90
-DEFAULT_MIN_PROFIT  = 0.10
+DEFAULT_MIN_PROFIT  = 0.02   # EUR/kWh — minimum price spread to justify a cycle
 
 # ── Dispatch actions ─────────────────────────────────────────────────────────
 ACTION_CHARGE    = "charge"

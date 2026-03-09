@@ -28,7 +28,7 @@ def _schema(d: dict) -> vol.Schema:
         vol.Required(CONF_POWER,        default=d.get(CONF_POWER,     DEFAULT_POWER)):     vol.Coerce(float),
         vol.Required(CONF_MIN_SOC,      default=d.get(CONF_MIN_SOC,   DEFAULT_MIN_SOC)):   vol.All(int, vol.Range(min=0,  max=49)),
         vol.Required(CONF_MAX_SOC,      default=d.get(CONF_MAX_SOC,   DEFAULT_MAX_SOC)):   vol.All(int, vol.Range(min=51, max=100)),
-        vol.Required(CONF_MIN_PROFIT,   default=d.get(CONF_MIN_PROFIT, DEFAULT_MIN_PROFIT)): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+        vol.Required(CONF_MIN_PROFIT,   default=d.get(CONF_MIN_PROFIT, DEFAULT_MIN_PROFIT)): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
         # ── Zendure (all optional — leave blank to disable) ───────────────────
         vol.Optional(CONF_ZEN_SOC):              _OPT_SENSOR_SEL,
         vol.Optional(CONF_ZEN_SOC_MIN):          _OPT_NUMBER_SEL,
