@@ -109,7 +109,7 @@ def _extract_prices(state_obj: Any) -> list[dict]:
             })
 
         if prices:
-            return sorted(prices, key=lambda x: x["ts"])[:24]
+            return sorted(prices, key=lambda x: x["ts"])
 
     # ------------------------------------------------------------------
     # Format 2: Zonneplan ONE (HACS) — attributes.forecast = [{datetime, electricity_price, ...}, ...]
@@ -146,7 +146,7 @@ def _extract_prices(state_obj: Any) -> list[dict]:
                 except Exception:
                     continue
             if prices:
-                return sorted(prices, key=lambda x: x["ts"])[:24]
+                return sorted(prices, key=lambda x: x["ts"])
 
     # ------------------------------------------------------------------
     # Format 3: Tibber (HACS) — attributes.prices = [{startsAt, total}, ...]
@@ -175,7 +175,7 @@ def _extract_prices(state_obj: Any) -> list[dict]:
                 except Exception:
                     continue
             if prices:
-                return sorted(prices, key=lambda x: x["ts"])[:24]
+                return sorted(prices, key=lambda x: x["ts"])
 
     # ------------------------------------------------------------------
     # Format 3: Generic — attributes.today / attributes.prices = [float, ...]
@@ -202,7 +202,7 @@ def _extract_prices(state_obj: Any) -> list[dict]:
                         "price":    round(price_mwh, 2),
                     })
                 if prices:
-                    return prices[:24]
+                    return prices
 
     raise ValueError(
         "Could not extract hourly prices from sensor. "
