@@ -14,7 +14,10 @@
           "zendure_soc_entity": "[Zendure] SoC sensor (e.g. sensor.hyper_2000_electric_level)",
           "zendure_soc_min_entity": "[Zendure] Min SoC number (e.g. number.hyper_2000_min_soc)",
           "zendure_soc_max_entity": "[Zendure] Max SoC number (e.g. number.hyper_2000_soc_set)",
-          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number (e.g. number.hyper_2000_inverse_max_power)"
+          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number (e.g. number.hyper_2000_inverse_max_power)",
+          "round_trip_efficiency": "Round-trip efficiency (%)",
+          "discharge_usage_power": "Discharge-to-usage power (kW)",
+          "return_price_formula": "Return price formula (variable: current_price in EUR/MWh)"
         }
       }
     },
@@ -39,7 +42,10 @@
           "zendure_soc_entity": "[Zendure] SoC sensor",
           "zendure_soc_min_entity": "[Zendure] Min SoC number",
           "zendure_soc_max_entity": "[Zendure] Max SoC number",
-          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number"
+          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number",
+          "round_trip_efficiency": "Round-trip efficiency (%)",
+          "discharge_usage_power": "Discharge-to-usage power (kW)",
+          "return_price_formula": "Return price formula (variable: current_price in EUR/MWh)"
         }
       }
     },

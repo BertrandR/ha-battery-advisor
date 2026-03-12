@@ -10,8 +10,10 @@ from .const import (
     DOMAIN,
     CONF_PRICE_ENTITY,
     CONF_CAPACITY, CONF_POWER, CONF_MIN_SOC, CONF_MAX_SOC, CONF_MIN_PROFIT,
+    CONF_RTE, CONF_DISCHARGE_USAGE_POWER, CONF_RETURN_PRICE_FORMULA,
     CONF_ZEN_SOC, CONF_ZEN_SOC_MIN, CONF_ZEN_SOC_MAX, CONF_ZEN_INVERSE_MAX_POWER,
     DEFAULT_CAPACITY, DEFAULT_POWER, DEFAULT_MIN_SOC, DEFAULT_MAX_SOC, DEFAULT_MIN_PROFIT,
+    DEFAULT_RTE, DEFAULT_DISCHARGE_USAGE_POWER, DEFAULT_RETURN_PRICE_FORMULA,
 )
 from .coordinator import BatteryOptimizerCoordinator
 
@@ -25,15 +27,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = BatteryOptimizerCoordinator(
         hass,
         price_entity_id              = cfg[CONF_PRICE_ENTITY],
-        capacity                     = cfg.get(CONF_CAPACITY,   DEFAULT_CAPACITY),
-        power                        = cfg.get(CONF_POWER,      DEFAULT_POWER),
-        min_soc                      = cfg.get(CONF_MIN_SOC,    DEFAULT_MIN_SOC),
-        max_soc                      = cfg.get(CONF_MAX_SOC,    DEFAULT_MAX_SOC),
-        min_profit                   = cfg.get(CONF_MIN_PROFIT, DEFAULT_MIN_PROFIT),
-        zen_soc_entity               = cfg.get(CONF_ZEN_SOC)                or None,
-        zen_soc_min_entity           = cfg.get(CONF_ZEN_SOC_MIN)            or None,
-        zen_soc_max_entity           = cfg.get(CONF_ZEN_SOC_MAX)            or None,
-        zen_inverse_max_power_entity = cfg.get(CONF_ZEN_INVERSE_MAX_POWER)  or None,
+        capacity                     = cfg.get(CONF_CAPACITY,              DEFAULT_CAPACITY),
+        power                        = cfg.get(CONF_POWER,                 DEFAULT_POWER),
+        min_soc                      = cfg.get(CONF_MIN_SOC,               DEFAULT_MIN_SOC),
+        max_soc                      = cfg.get(CONF_MAX_SOC,               DEFAULT_MAX_SOC),
+        min_profit                   = cfg.get(CONF_MIN_PROFIT,            DEFAULT_MIN_PROFIT),
+        rte                          = cfg.get(CONF_RTE,                   DEFAULT_RTE),
+        discharge_usage_power        = cfg.get(CONF_DISCHARGE_USAGE_POWER, DEFAULT_DISCHARGE_USAGE_POWER),
+        return_price_formula         = cfg.get(CONF_RETURN_PRICE_FORMULA,  DEFAULT_RETURN_PRICE_FORMULA),
+        zen_soc_entity               = cfg.get(CONF_ZEN_SOC)               or None,
+        zen_soc_min_entity           = cfg.get(CONF_ZEN_SOC_MIN)           or None,
+        zen_soc_max_entity           = cfg.get(CONF_ZEN_SOC_MAX)           or None,
+        zen_inverse_max_power_entity = cfg.get(CONF_ZEN_INVERSE_MAX_POWER) or None,
     )
 
     await coordinator.async_setup()
