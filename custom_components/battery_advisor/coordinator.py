@@ -529,6 +529,7 @@ def _apply_min_profit_filter(
         """Average cost per kWh stored, accounting for which charge action and tariff."""
         costs = []
         for h in range(start, end):
+            # charge_solar opportunity cost is return_price; charge_grid costs buy_price
             tariff = return_eur_kwh[h] if actions[h] == ACTION_CHARGE_SOLAR else buy_eur_kwh[h]
             costs.append(tariff / charge_eff)
         return sum(costs) / len(costs)
@@ -544,22 +545,31 @@ def _apply_min_profit_filter(
     suppress: set[int] = set()
 
     # ── Pass 1: charge → discharge pairs ─────────────────────────────────────
+    # Pair each charge block with the following discharge block that gives the
+    # highest effective spread — not just the nearest one.  This prevents a
+    # small micro-cycle immediately after a charge block from being chosen as
+    # the pair, causing the real profitable discharge window to be orphaned.
     charge_blocks    = get_blocks_from(actions, CHARGE_ACTIONS)
     discharge_blocks = get_blocks_from(actions, DISCHARGE_ACTIONS)
     used_discharge: set[int] = set()
 
     for cb_start, cb_end in charge_blocks:
-        match = None
-        for idx, (db_start, db_end) in enumerate(discharge_blocks):
-            if db_start >= cb_end and idx not in used_discharge:
-                match = (idx, db_start, db_end)
-                break
+        # Find all following discharge blocks and pick the one with best spread
+        candidates = [
+            (idx, db_start, db_end)
+            for idx, (db_start, db_end) in enumerate(discharge_blocks)
+            if db_start >= cb_end and idx not in used_discharge
+        ]
 
-        if match is None:
+        if not candidates:
             suppress.update(range(cb_start, cb_end))
             continue
 
-        didx, db_start, db_end = match
+        best_match = max(
+            candidates,
+            key=lambda c: avg_effective_discharge_revenue(c[1], c[2]) - avg_effective_charge_cost(cb_start, cb_end),
+        )
+        didx, db_start, db_end = best_match
         spread = avg_effective_discharge_revenue(db_start, db_end) - avg_effective_charge_cost(cb_start, cb_end)
 
         _LOGGER.debug(
