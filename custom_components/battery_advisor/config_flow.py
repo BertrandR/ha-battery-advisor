@@ -26,6 +26,8 @@ _pos_float = lambda v: vol.All(vol.Coerce(float), vol.Range(min=0.01))
 
 
 def _validate_formula(formula: str) -> bool:
+    if not formula:
+        return True   # empty = use native excl-tax (Zonneplan) or buy price (others)
     try:
         result = eval(formula, {"__builtins__": {}}, {"current_price": 100.0})  # noqa: S307
         return isinstance(result, (int, float))

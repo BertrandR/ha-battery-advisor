@@ -30,6 +30,9 @@ SOC_STEP_KWH = 0.05  # 0.05 kWh fine grid — derived from energy values, not fi
 # ---------------------------------------------------------------------------
 
 def _apply_return_formula(buy_price_mwh: float, formula: str) -> float:
+    """Apply return price formula. Empty string = identity (return equals buy)."""
+    if not formula:
+        return buy_price_mwh
     try:
         result = eval(formula, {"__builtins__": {}}, {"current_price": buy_price_mwh})  # noqa: S307
         return float(result)
@@ -60,7 +63,7 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
     attrs    = state_obj.attributes or {}
     now      = datetime.now(timezone.utc)
     now_ts   = now.timestamp()
-    use_formula = (return_formula != DEFAULT_RETURN_PRICE_FORMULA)
+    use_formula = bool(return_formula)  # non-empty = explicit override, always apply
 
     def _slot(dt, buy_mwh, ret_mwh=None):
         if ret_mwh is None:
@@ -115,10 +118,14 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
                     if dt.timestamp() < now_ts - 3600:
                         continue
                     buy_mwh = float(raw_buy) / 10_000_000 * 1000
-                    if use_formula or raw_ret is None:
+                    if use_formula:
+                        # Explicit formula set — apply it (e.g. "current_price" = equal tariffs)
                         ret_mwh = _apply_return_formula(buy_mwh, return_formula)
-                    else:
+                    elif raw_ret is not None:
+                        # Auto-detect: use Zonneplan's native excl-tax field
                         ret_mwh = float(raw_ret) / 10_000_000 * 1000
+                    else:
+                        ret_mwh = buy_mwh
                     prices.append(_slot(dt, buy_mwh, ret_mwh))
                 except Exception:
                     continue

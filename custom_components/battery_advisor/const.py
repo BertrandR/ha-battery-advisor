@@ -28,7 +28,7 @@ DEFAULT_CHARGE_POWER        = 2.4    # kW
 DEFAULT_DISCHARGE_POWER     = 2.4    # kW
 DEFAULT_DISCHARGE_USAGE_POWER = 0.3  # kW
 DEFAULT_MIN_PROFIT          = 0.02   # EUR/kWh
-DEFAULT_RETURN_PRICE_FORMULA = "current_price"
+DEFAULT_RETURN_PRICE_FORMULA = ""  # empty = auto-detect (use native excl-tax if available)
 
 # ── Dispatch actions ──────────────────────────────────────────────────────────
 ACTION_CHARGE_GRID      = "charge_grid"

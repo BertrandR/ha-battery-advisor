@@ -5,7 +5,10 @@
         "title": "Price Sensor",
         "data": {
           "price_entity_id": "Price sensor entity",
-          "return_price_formula": "Return price formula (variable: current_price in EUR/MWh)"
+          "return_price_formula": "Return price formula (empty = auto; 'current_price' = same as buy; e.g. 'current_price / 1.21' to strip VAT)"
+        },
+        "data_description": {
+          "return_price_formula": "Leave empty to use the native return tariff from your sensor (Zonneplan: electricity_price_excl_tax). Set to 'current_price' to use the same price for both buy and sell. Variable available: current_price (EUR/MWh)."
         }
       },
       "battery": {
@@ -41,7 +44,10 @@
         "title": "Price Sensor",
         "data": {
           "price_entity_id": "Price sensor entity",
-          "return_price_formula": "Return price formula (variable: current_price in EUR/MWh)"
+          "return_price_formula": "Return price formula (empty = auto; 'current_price' = same as buy; e.g. 'current_price / 1.21' to strip VAT)"
+        },
+        "data_description": {
+          "return_price_formula": "Leave empty to use the native return tariff from your sensor (Zonneplan: electricity_price_excl_tax). Set to 'current_price' to use the same price for both buy and sell. Variable available: current_price (EUR/MWh)."
         }
       },
       "battery": {
