@@ -2,55 +2,73 @@
   "config": {
     "step": {
       "user": {
-        "title": "Battery Dispatch Advisor",
-        "description": "Select your electricity price sensor and configure your battery. Zendure entities are optional \u2014 when provided, limits and SoC are read live from your device to improve schedule accuracy. The integration never writes to your device.",
+        "title": "Price Sensor",
         "data": {
-          "price_entity_id": "Electricity price sensor",
-          "capacity": "Battery capacity (kWh)",
-          "power": "Max charge/discharge power (kW) \u2014 fallback if Zendure not set",
-          "min_soc": "Min SoC % \u2014 fallback if Zendure not set",
-          "max_soc": "Max SoC % \u2014 fallback if Zendure not set",
-          "min_profit": "Minimum cycle profit (EUR/kWh) \u2014 skip cycles with a smaller buy/sell spread",
-          "zendure_soc_entity": "[Zendure] SoC sensor (e.g. sensor.hyper_2000_electric_level)",
-          "zendure_soc_min_entity": "[Zendure] Min SoC number (e.g. number.hyper_2000_min_soc)",
-          "zendure_soc_max_entity": "[Zendure] Max SoC number (e.g. number.hyper_2000_soc_set)",
-          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number (e.g. number.hyper_2000_inverse_max_power)",
-          "round_trip_efficiency": "Round-trip efficiency (%)",
-          "discharge_usage_power": "Discharge-to-usage power (kW)",
+          "price_entity_id": "Price sensor entity",
           "return_price_formula": "Return price formula (variable: current_price in EUR/MWh)"
+        }
+      },
+      "battery": {
+        "title": "Battery",
+        "data": {
+          "charge_energy": "Charge energy \u2014 grid kWh to go from min to max SoC",
+          "discharge_energy": "Discharge energy \u2014 grid kWh delivered from max to min SoC",
+          "charge_power": "Charge power (kW)",
+          "discharge_power": "Discharge power (kW)"
+        }
+      },
+      "schedule": {
+        "title": "Schedule",
+        "data": {
+          "min_profit": "Minimum profit threshold (EUR/kWh)",
+          "discharge_usage_power": "Discharge-to-usage assumed power (kW)"
+        }
+      },
+      "zendure": {
+        "title": "Zendure (optional)",
+        "data": {
+          "zendure_soc_entity": "Zendure SoC sensor entity (leave blank to skip)"
         }
       }
     },
     "error": {
-      "soc_range_invalid": "Min SoC must be lower than Max SoC."
-    },
-    "abort": {
-      "already_configured": "This price sensor is already configured."
+      "formula_invalid": "Return price formula is invalid. Use 'current_price' as the variable."
     }
   },
   "options": {
     "step": {
-      "init": {
-        "title": "Update Battery Advisor Settings",
+      "user": {
+        "title": "Price Sensor",
         "data": {
-          "price_entity_id": "Electricity price sensor",
-          "capacity": "Battery capacity (kWh)",
-          "power": "Max charge/discharge power (kW) \u2014 fallback if Zendure not set",
-          "min_soc": "Min SoC % \u2014 fallback if Zendure not set",
-          "max_soc": "Max SoC % \u2014 fallback if Zendure not set",
-          "min_profit": "Minimum cycle profit (EUR/kWh)",
-          "zendure_soc_entity": "[Zendure] SoC sensor",
-          "zendure_soc_min_entity": "[Zendure] Min SoC number",
-          "zendure_soc_max_entity": "[Zendure] Max SoC number",
-          "zendure_inverse_max_power_entity": "[Zendure] Inverse max power number",
-          "round_trip_efficiency": "Round-trip efficiency (%)",
-          "discharge_usage_power": "Discharge-to-usage power (kW)",
+          "price_entity_id": "Price sensor entity",
           "return_price_formula": "Return price formula (variable: current_price in EUR/MWh)"
+        }
+      },
+      "battery": {
+        "title": "Battery",
+        "data": {
+          "charge_energy": "Charge energy \u2014 grid kWh to go from min to max SoC",
+          "discharge_energy": "Discharge energy \u2014 grid kWh delivered from max to min SoC",
+          "charge_power": "Charge power (kW)",
+          "discharge_power": "Discharge power (kW)"
+        }
+      },
+      "schedule": {
+        "title": "Schedule",
+        "data": {
+          "min_profit": "Minimum profit threshold (EUR/kWh)",
+          "discharge_usage_power": "Discharge-to-usage assumed power (kW)"
+        }
+      },
+      "zendure": {
+        "title": "Zendure (optional)",
+        "data": {
+          "zendure_soc_entity": "Zendure SoC sensor entity (leave blank to skip)"
         }
       }
     },
     "error": {
-      "soc_range_invalid": "Min SoC must be lower than Max SoC."
+      "formula_invalid": "Return price formula is invalid."
     }
   }
 }

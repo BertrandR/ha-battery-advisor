@@ -26,7 +26,6 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: BatteryOptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
-
     entities = [
         BatteryActionSensor(coordinator, entry),
         BatteryPriceSensor(coordinator, entry),
@@ -36,14 +35,16 @@ async def async_setup_entry(
     ]
     if coordinator.zen_soc_entity:
         entities.append(BatterySocSensor(coordinator, entry))
-
     async_add_entities(entities, update_before_add=True)
 
 
 def _device(coordinator: BatteryOptimizerCoordinator, entry: ConfigEntry) -> DeviceInfo:
-    model = f"{coordinator.capacity} kWh / {coordinator.power:.1f} kW"
-    if coordinator.zen_soc_entity:
-        model += " · Zendure connected"
+    b = coordinator.battery
+    model = (
+        f"charge {b.charge_energy}kWh/{b.charge_power}kW  "
+        f"discharge {b.discharge_energy}kWh/{b.discharge_power}kW  "
+        f"eff {b.eff:.0%}"
+    )
     return DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)},
         name="Battery Advisor",
@@ -75,10 +76,7 @@ class _Base(CoordinatorEntity, SensorEntity):
 # ── 1. Current Action ────────────────────────────────────────────────────────
 
 class BatteryActionSensor(_Base):
-    """
-    Primary automation sensor.
-    State: charge_grid | charge_solar | discharge_net | discharge_usage | idle
-    """
+    """Primary automation trigger: charge_grid | charge_solar | discharge_net | discharge_usage | idle"""
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "current_action", "Current Action")
@@ -105,17 +103,13 @@ class BatteryActionSensor(_Base):
             "last_updated":         d.get("last_updated"),
         }
         if self.coordinator.zen_soc_entity:
-            attrs.update({
-                "zendure_soc":      d.get("zendure_soc"),
-                "zendure_power_kw": d.get("zendure_power_kw"),
-            })
+            attrs["zendure_soc"] = d.get("zendure_soc")
         return attrs
 
 
 # ── 2. Current Price ──────────────────────────────────────────────────────────
 
 class BatteryPriceSensor(_Base):
-    """Current hour's buy price in EUR/MWh."""
     _attr_native_unit_of_measurement = "EUR/MWh"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 1
@@ -133,23 +127,22 @@ class BatteryPriceSensor(_Base):
         schedule = self.coordinator.data.get("schedule", [])
         if not schedule:
             return {}
-        prices        = [h["price"]        for h in schedule]
-        return_prices = [h["return_price"]  for h in schedule]
+        prices  = [h["price"]        for h in schedule]
+        returns = [h["return_price"]  for h in schedule]
         return {
-            "min_price":        round(min(prices), 2),
-            "max_price":        round(max(prices), 2),
-            "avg_price":        round(sum(prices) / len(prices), 2),
+            "min_price":            round(min(prices),  2),
+            "max_price":            round(max(prices),  2),
+            "avg_price":            round(sum(prices)  / len(prices),  2),
             "current_return_price": self.coordinator.data.get("current_return_price"),
-            "min_return_price": round(min(return_prices), 2),
-            "max_return_price": round(max(return_prices), 2),
-            "avg_return_price": round(sum(return_prices) / len(return_prices), 2),
+            "min_return_price":     round(min(returns), 2),
+            "max_return_price":     round(max(returns), 2),
+            "avg_return_price":     round(sum(returns) / len(returns), 2),
         }
 
 
 # ── 3. Next Action ────────────────────────────────────────────────────────────
 
 class BatteryNextActionSensor(_Base):
-    """Next scheduled action change and when it starts."""
     _attr_icon = "mdi:clock-fast"
 
     def __init__(self, coordinator, entry):
@@ -176,7 +169,6 @@ class BatteryNextActionSensor(_Base):
 # ── 4. Daily Savings ──────────────────────────────────────────────────────────
 
 class BatterySavingsSensor(_Base):
-    """Estimated net arbitrage for the forecast window (EUR)."""
     _attr_native_unit_of_measurement = "EUR"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 2
@@ -199,7 +191,6 @@ class BatterySavingsSensor(_Base):
 # ── 5. Schedule ───────────────────────────────────────────────────────────────
 
 class BatteryScheduleSensor(_Base):
-    """Full dispatch schedule as attributes."""
     _attr_icon = "mdi:calendar-clock"
 
     def __init__(self, coordinator, entry):
@@ -213,21 +204,27 @@ class BatteryScheduleSensor(_Base):
     def extra_state_attributes(self) -> dict[str, Any]:
         d        = self.coordinator.data
         schedule = d.get("schedule", [])
+        b        = self.coordinator.battery
         return {
             "schedule":              schedule,
             "charge_grid_hours":     [h["hour"] for h in schedule if h["action"] == ACTION_CHARGE_GRID],
             "charge_solar_hours":    [h["hour"] for h in schedule if h["action"] == ACTION_CHARGE_SOLAR],
             "discharge_net_hours":   [h["hour"] for h in schedule if h["action"] == ACTION_DISCHARGE_NET],
             "discharge_usage_hours": [h["hour"] for h in schedule if h["action"] == ACTION_DISCHARGE_USAGE],
-            # Legacy combined lists for backwards-compatible automations
-            "charge_hours":    [h["hour"] for h in schedule if h["action"] in CHARGE_ACTIONS],
-            "discharge_hours": [h["hour"] for h in schedule if h["action"] in DISCHARGE_ACTIONS],
-            "price_entity":    d.get("price_entity"),
-            "last_updated":    d.get("last_updated"),
+            # Legacy combined lists
+            "charge_hours":          [h["hour"] for h in schedule if h["action"] in CHARGE_ACTIONS],
+            "discharge_hours":       [h["hour"] for h in schedule if h["action"] in DISCHARGE_ACTIONS],
+            # Battery derived info
+            "battery_charge_time":    d.get("battery_charge_time"),
+            "battery_discharge_time": d.get("battery_discharge_time"),
+            "battery_usable_kwh":     d.get("battery_usable_kwh"),
+            "battery_eff":            d.get("battery_eff"),
+            "price_entity":           d.get("price_entity"),
+            "last_updated":           d.get("last_updated"),
         }
 
 
-# ── 6. Zendure SoC ───────────────────────────────────────────────────────────
+# ── 6. Battery SoC (only when zen_soc_entity configured) ─────────────────────
 
 class BatterySocSensor(_Base):
     _attr_native_unit_of_measurement = "%"
@@ -245,20 +242,21 @@ class BatterySocSensor(_Base):
     @property
     def icon(self) -> str:
         soc = self.native_value
-        if soc is None:   return "mdi:battery-unknown"
-        if soc >= 95:     return "mdi:battery"
-        if soc >= 75:     return "mdi:battery-80"
-        if soc >= 55:     return "mdi:battery-60"
-        if soc >= 35:     return "mdi:battery-40"
-        if soc >= 15:     return "mdi:battery-20"
+        if soc is None:  return "mdi:battery-unknown"
+        if soc >= 95:    return "mdi:battery"
+        if soc >= 75:    return "mdi:battery-80"
+        if soc >= 55:    return "mdi:battery-60"
+        if soc >= 35:    return "mdi:battery-40"
+        if soc >= 15:    return "mdi:battery-20"
         return "mdi:battery-alert"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self.coordinator.data
+        b = self.coordinator.battery
+        soc = self.native_value
         return {
-            "min_soc":    d.get("zendure_min_soc"),
-            "max_soc":    d.get("zendure_max_soc"),
-            "power_kw":   d.get("zendure_power_kw"),
-            "soc_entity": self.coordinator.zen_soc_entity,
+            "stored_kwh":  round(b.soc_to_kwh(soc), 3) if soc is not None else None,
+            "usable_kwh":  d.get("battery_usable_kwh"),
+            "soc_entity":  self.coordinator.zen_soc_entity,
         }

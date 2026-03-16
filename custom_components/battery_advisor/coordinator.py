@@ -16,265 +16,179 @@ from .const import (
     ACTION_DISCHARGE_NET, ACTION_DISCHARGE_USAGE,
     ACTION_IDLE,
     CHARGE_ACTIONS, DISCHARGE_ACTIONS,
-    CONF_RTE, DEFAULT_RTE,
-    CONF_DISCHARGE_USAGE_POWER, DEFAULT_DISCHARGE_USAGE_POWER,
-    CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA,
+    DEFAULT_DISCHARGE_USAGE_POWER,
+    DEFAULT_RETURN_PRICE_FORMULA,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-SOC_STEP_KWH = 0.2  # 0.2 kWh gives exact representation of common power values
+SOC_STEP_KWH = 0.05  # 0.05 kWh fine grid — derived from energy values, not fixed power steps
 
 
 # ---------------------------------------------------------------------------
-# Return price formula evaluation
+# Return price formula
 # ---------------------------------------------------------------------------
 
 def _apply_return_formula(buy_price_mwh: float, formula: str) -> float:
-    """
-    Evaluate the return price formula.
-
-    Variable: current_price  (EUR/MWh, same unit as buy_price_mwh)
-    Example formulas:
-      "current_price"                          → identity (Zonneplan default)
-      "current_price / 1.21"                   → strip 21% VAT
-      "current_price / 1.21 - 40.0"           → strip VAT and flat energy tax (EUR/MWh)
-      "(current_price - 52.9) / 1.21"         → strip flat tax first, then VAT
-    Returns buy_price_mwh unchanged on any evaluation error.
-    """
     try:
         result = eval(formula, {"__builtins__": {}}, {"current_price": buy_price_mwh})  # noqa: S307
         return float(result)
     except Exception:
-        _LOGGER.warning("Return price formula %r failed for price %.2f — using buy price", formula, buy_price_mwh)
+        _LOGGER.warning("Return price formula %r failed for %.2f — using buy price", formula, buy_price_mwh)
         return buy_price_mwh
 
 
 # ---------------------------------------------------------------------------
-# Price extraction — supports multiple HA sensor formats
+# Price extraction
 # ---------------------------------------------------------------------------
 
 def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_FORMULA) -> list[dict]:
     """
-    Extract an ordered list of hourly price dicts from a HA state object.
+    Extract hourly price dicts from a HA state object.
 
-    Supported sensor formats
-    ------------------------
-    1. Official Nordpool / custom Nordpool HACS:
-       attributes: raw_today = [{start, end, value}, ...]
-                   raw_tomorrow = [{start, end, value}, ...]   (optional)
-       Price unit auto-detected: if max value < 10 → assumed EUR/kWh → convert to EUR/MWh
+    Returns list of {ts, datetime, hour, price, return_price} — both in EUR/MWh.
 
-    2. Zonneplan ONE (HACS — sensor.zonneplan_current_electricity_tariff):
-       attributes: forecast = [{datetime, electricity_price, electricity_price_excl_tax, ...}, ...]
-       datetime format : "2026-03-05T14:00:00.000Z"  (UTC, millisecond precision)
-       electricity_price         : incl. tax, Zonneplan micro-units (÷10,000,000 → EUR/kWh)
-       electricity_price_excl_tax: excl. tax, same micro-unit encoding
-       When return_formula is the default identity, uses electricity_price_excl_tax directly.
-       When return_formula is overridden, applies formula to buy price instead.
-
-    3. Tibber (via HACS):
-       attributes: prices = [{startsAt, total, ...}, ...]
-
-    4. Generic list sensor:
-       attributes: today / prices / hourly_prices = [float, ...]  (24 floats from midnight)
-
-    Returns list of dicts:  {ts, datetime, hour, price, return_price}
-    where both prices are EUR/MWh.  return_price <= price always.
-    Raises ValueError if no usable data found.
+    Supported formats:
+      1. Nordpool (raw_today / raw_tomorrow)
+      2. Zonneplan ONE (forecast attribute with electricity_price / electricity_price_excl_tax)
+      3. Tibber (prices attribute with startsAt / total)
+      4. Generic float list (today / prices / hourly_prices attribute)
     """
     if state_obj is None or state_obj.state in ("unavailable", "unknown", None):
-        raise ValueError("Price sensor is unavailable or has no state")
+        raise ValueError("Price sensor unavailable")
 
-    attrs = state_obj.attributes or {}
-    now = datetime.now(timezone.utc)
-    now_ts = now.timestamp()
-
+    attrs    = state_obj.attributes or {}
+    now      = datetime.now(timezone.utc)
+    now_ts   = now.timestamp()
     use_formula = (return_formula != DEFAULT_RETURN_PRICE_FORMULA)
 
-    # ------------------------------------------------------------------
-    # Format 1: Nordpool
-    # ------------------------------------------------------------------
-    raw_today    = attrs.get("raw_today")
-    raw_tomorrow = attrs.get("raw_tomorrow")
-    tomorrow_valid = attrs.get("tomorrow_valid", False)
+    def _slot(dt, buy_mwh, ret_mwh=None):
+        if ret_mwh is None:
+            ret_mwh = _apply_return_formula(buy_mwh, return_formula)
+        return {
+            "ts":           dt.timestamp(),
+            "datetime":     dt.isoformat(),
+            "hour":         dt.astimezone().strftime("%H:00"),
+            "price":        round(buy_mwh, 2),
+            "return_price": round(ret_mwh, 2),
+        }
 
-    if raw_today and isinstance(raw_today, (list, tuple)) and len(raw_today) > 0:
+    # ── Format 1: Nordpool ────────────────────────────────────────────────────
+    raw_today = attrs.get("raw_today")
+    if raw_today and isinstance(raw_today, (list, tuple)):
         combined = list(raw_today)
-        if tomorrow_valid and raw_tomorrow:
-            combined += list(raw_tomorrow)
-
+        if attrs.get("tomorrow_valid") and attrs.get("raw_tomorrow"):
+            combined += list(attrs["raw_tomorrow"])
         prices = []
         for slot in combined:
             try:
-                start_str = slot.get("start") if isinstance(slot, dict) else getattr(slot, "start", None)
-                value     = slot.get("value") if isinstance(slot, dict) else getattr(slot, "value", None)
+                start = slot.get("start") if isinstance(slot, dict) else getattr(slot, "start", None)
+                value = slot.get("value") if isinstance(slot, dict) else getattr(slot, "value", None)
+                if start is None or value is None:
+                    continue
+                dt = datetime.fromisoformat(str(start)) if isinstance(start, str) else start
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt.timestamp() < now_ts - 3600:
+                    continue
+                buy = _to_eur_mwh(float(value), attrs)
+                prices.append(_slot(dt, buy))
             except Exception:
                 continue
-            if start_str is None or value is None:
-                continue
-            try:
-                if isinstance(start_str, str):
-                    dt = datetime.fromisoformat(start_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                else:
-                    dt = start_str
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-            except Exception:
-                continue
-            ts = dt.timestamp()
-            if ts < now_ts - 3600:
-                continue
-            buy_mwh = _to_eur_mwh(float(value), attrs)
-            ret_mwh = _apply_return_formula(buy_mwh, return_formula)
-            prices.append({
-                "ts":           ts,
-                "datetime":     dt.isoformat(),
-                "hour":         dt.astimezone().strftime("%H:00"),
-                "price":        round(buy_mwh, 2),
-                "return_price": round(ret_mwh, 2),
-            })
         if prices:
             return sorted(prices, key=lambda x: x["ts"])
 
-    # ------------------------------------------------------------------
-    # Format 2: Zonneplan ONE
-    # ------------------------------------------------------------------
-    zonneplan_forecast = attrs.get("forecast")
-    if zonneplan_forecast and isinstance(zonneplan_forecast, (list, tuple)) and len(zonneplan_forecast) > 0:
-        first = zonneplan_forecast[0]
+    # ── Format 2: Zonneplan ONE ───────────────────────────────────────────────
+    forecast = attrs.get("forecast")
+    if forecast and isinstance(forecast, (list, tuple)) and len(forecast) > 0:
+        first = forecast[0]
         if isinstance(first, dict) and "electricity_price" in first and "datetime" in first:
             prices = []
-            for slot in zonneplan_forecast:
+            for slot in forecast:
                 try:
-                    dt_str    = slot.get("datetime")
-                    raw_buy   = slot.get("electricity_price")
-                    raw_ret   = slot.get("electricity_price_excl_tax")
-                    if dt_str is None or raw_buy is None:
+                    dt_str  = slot.get("datetime", "")
+                    raw_buy = slot.get("electricity_price")
+                    raw_ret = slot.get("electricity_price_excl_tax")
+                    if not dt_str or raw_buy is None:
                         continue
-                    dt_str_clean = dt_str.rstrip("Z").split(".")[0]
-                    dt = datetime.fromisoformat(dt_str_clean).replace(tzinfo=timezone.utc)
-                    ts = dt.timestamp()
-                    if ts < now_ts - 3600:
+                    dt = datetime.fromisoformat(dt_str.rstrip("Z").split(".")[0]).replace(tzinfo=timezone.utc)
+                    if dt.timestamp() < now_ts - 3600:
                         continue
                     buy_mwh = float(raw_buy) / 10_000_000 * 1000
-                    # If user overrode formula, apply it; otherwise use native excl_tax field
                     if use_formula or raw_ret is None:
                         ret_mwh = _apply_return_formula(buy_mwh, return_formula)
                     else:
                         ret_mwh = float(raw_ret) / 10_000_000 * 1000
-                    prices.append({
-                        "ts":           ts,
-                        "datetime":     dt.isoformat(),
-                        "hour":         dt.astimezone().strftime("%H:00"),
-                        "price":        round(buy_mwh, 2),
-                        "return_price": round(ret_mwh, 2),
-                    })
+                    prices.append(_slot(dt, buy_mwh, ret_mwh))
                 except Exception:
                     continue
             if prices:
                 return sorted(prices, key=lambda x: x["ts"])
 
-    # ------------------------------------------------------------------
-    # Format 3: Tibber
-    # ------------------------------------------------------------------
-    tibber_prices = attrs.get("prices")
-    if tibber_prices and isinstance(tibber_prices, (list, tuple)) and len(tibber_prices) > 0:
-        first = tibber_prices[0]
+    # ── Format 3: Tibber ──────────────────────────────────────────────────────
+    tibber = attrs.get("prices")
+    if tibber and isinstance(tibber, (list, tuple)) and len(tibber) > 0:
+        first = tibber[0]
         if isinstance(first, dict) and "startsAt" in first:
             prices = []
-            for slot in tibber_prices:
+            for slot in tibber:
                 try:
                     dt = datetime.fromisoformat(slot["startsAt"])
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
-                    ts = dt.timestamp()
-                    if ts < now_ts - 3600:
+                    if dt.timestamp() < now_ts - 3600:
                         continue
-                    value   = float(slot.get("total") or slot.get("energy") or 0)
-                    buy_mwh = _to_eur_mwh(value, attrs)
-                    ret_mwh = _apply_return_formula(buy_mwh, return_formula)
-                    prices.append({
-                        "ts":           ts,
-                        "datetime":     dt.isoformat(),
-                        "hour":         dt.astimezone().strftime("%H:00"),
-                        "price":        round(buy_mwh, 2),
-                        "return_price": round(ret_mwh, 2),
-                    })
+                    buy = _to_eur_mwh(float(slot.get("total") or slot.get("energy") or 0), attrs)
+                    prices.append(_slot(dt, buy))
                 except Exception:
                     continue
             if prices:
                 return sorted(prices, key=lambda x: x["ts"])
 
-    # ------------------------------------------------------------------
-    # Format 4: Generic list
-    # ------------------------------------------------------------------
-    for attr_key in ("today", "prices", "hourly_prices"):
-        generic = attrs.get(attr_key)
-        if generic and isinstance(generic, (list, tuple)) and len(generic) >= 1:
+    # ── Format 4: Generic float list ─────────────────────────────────────────
+    for key in ("today", "prices", "hourly_prices"):
+        generic = attrs.get(key)
+        if generic and isinstance(generic, (list, tuple)):
             if all(isinstance(v, (int, float)) for v in generic if v is not None):
                 midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
                 prices = []
                 for i, value in enumerate(generic):
                     if value is None:
                         continue
-                    dt  = midnight + timedelta(hours=i)
-                    ts  = dt.timestamp()
-                    if ts < now_ts - 3600:
+                    dt = midnight + timedelta(hours=i)
+                    if dt.timestamp() < now_ts - 3600:
                         continue
-                    buy_mwh = _to_eur_mwh(float(value), attrs)
-                    ret_mwh = _apply_return_formula(buy_mwh, return_formula)
-                    prices.append({
-                        "ts":           ts,
-                        "datetime":     dt.isoformat(),
-                        "hour":         dt.strftime("%H:00"),
-                        "price":        round(buy_mwh, 2),
-                        "return_price": round(ret_mwh, 2),
-                    })
+                    buy = _to_eur_mwh(float(value), attrs)
+                    prices.append(_slot(dt, buy))
                 if prices:
                     return prices
 
     raise ValueError(
-        "Could not extract hourly prices from sensor. "
-        "Supported formats: Nordpool (official/HACS), Zonneplan ONE (forecast attribute), "
-        "Tibber, or any sensor with a 'today', 'prices', or 'hourly_prices' attribute "
-        "containing a list of floats."
+        "Could not extract prices. Supported: Nordpool, Zonneplan ONE, Tibber, "
+        "or sensor with today/prices/hourly_prices float list attribute."
     )
 
 
 def _to_eur_mwh(value: float, attrs: dict) -> float:
-    """Normalise a price value to EUR/MWh."""
     uom = (attrs.get("unit_of_measurement") or attrs.get("unit") or "").lower()
     if "kwh" in uom:
         return value * 1000.0
     if "mwh" in uom:
         return value
-    if abs(value) < 10:
-        return value * 1000.0
-    return value
+    return value * 1000.0 if abs(value) < 10 else value
 
 
 # ---------------------------------------------------------------------------
-# Daylight window — uses HA sun entity
+# Daylight window — HA sun entity
 # ---------------------------------------------------------------------------
 
 def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
-    """
-    Return True if the given Unix timestamp falls within daylight hours
-    according to the sun.sun entity (next_rising / next_setting attributes).
-
-    Falls back to a fixed 07:00–20:00 window if sun entity is unavailable.
-    """
     sun = hass.states.get("sun.sun")
     if sun is not None:
         try:
             rising_str  = sun.attributes.get("next_rising")
             setting_str = sun.attributes.get("next_setting")
             if rising_str and setting_str:
-                # HA provides these as ISO strings; they are always in the future.
-                # We build a day's worth of windows by looking at today's date.
                 slot_dt = datetime.fromtimestamp(slot_ts, tz=timezone.utc)
                 rising  = datetime.fromisoformat(rising_str)
                 setting = datetime.fromisoformat(setting_str)
@@ -282,9 +196,6 @@ def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
                     rising  = rising.replace(tzinfo=timezone.utc)
                 if setting.tzinfo is None:
                     setting = setting.replace(tzinfo=timezone.utc)
-
-                # next_rising/setting are always future — shift back by 0 or 1 day
-                # to cover today's window and tomorrow's window
                 for day_offset in range(-2, 3):
                     r = rising  + timedelta(days=day_offset)
                     s = setting + timedelta(days=day_offset)
@@ -293,78 +204,126 @@ def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
                 return False
         except Exception:
             pass
-
-    # Fallback: fixed 07:00–20:00 local time
     local_hour = datetime.fromtimestamp(slot_ts).hour
     return 7 <= local_hour < 20
 
 
 # ---------------------------------------------------------------------------
-# Optimisation algorithm — Dynamic Programming
+# Battery model — derived from measured charge/discharge energy
+# ---------------------------------------------------------------------------
+
+class BatteryModel:
+    """
+    Encapsulates all battery parameters derived from two measured quantities:
+      charge_energy   — grid-side kWh drawn to go from min→max SoC
+      discharge_energy — grid-side kWh delivered going from max→min SoC
+
+    Derived:
+      eff             = sqrt(discharge_energy / charge_energy)
+                        symmetric charge/discharge efficiency
+      usable_kwh      = charge_energy × eff   (battery-side usable capacity)
+      charge_time     = charge_energy / charge_power    (hours to full charge)
+      discharge_time  = discharge_energy / discharge_power (hours to full discharge)
+
+    SoC conversion:
+      stored_kwh(soc%) = soc / 100 × usable_kwh
+      — treats 0% as empty (min SoC) and 100% as full (max SoC)
+    """
+
+    def __init__(
+        self,
+        charge_energy: float,
+        discharge_energy: float,
+        charge_power: float,
+        discharge_power: float,
+    ):
+        self.charge_energy    = charge_energy
+        self.discharge_energy = discharge_energy
+        self.charge_power     = charge_power
+        self.discharge_power  = discharge_power
+
+        self.eff              = math.sqrt(discharge_energy / charge_energy)
+        self.usable_kwh       = charge_energy * self.eff
+        self.charge_time      = charge_energy  / charge_power    # hours
+        self.discharge_time   = discharge_energy / discharge_power  # hours
+
+        # Grid-side kWh per hour at rated power
+        self.charge_kwh_per_hour    = charge_power     # grid draw per charge hour
+        self.discharge_kwh_per_hour = discharge_power  # grid delivery per discharge hour
+
+        # Battery-side kWh stored/released per rated hour
+        self.charge_soc_per_hour    = charge_power    * self.eff   # stored per charge hour
+        self.discharge_soc_per_hour = discharge_power / self.eff   # released per discharge hour
+
+    def soc_to_kwh(self, soc_pct: float) -> float:
+        """Convert SoC% (0-100) to stored battery kWh."""
+        return max(0.0, min(self.usable_kwh, soc_pct / 100.0 * self.usable_kwh))
+
+    def kwh_to_soc(self, stored_kwh: float) -> float:
+        """Convert stored battery kWh to SoC%."""
+        return stored_kwh / self.usable_kwh * 100.0 if self.usable_kwh > 0 else 0.0
+
+    def __repr__(self):
+        return (
+            f"BatteryModel(charge={self.charge_energy}kWh/{self.charge_power}kW "
+            f"discharge={self.discharge_energy}kWh/{self.discharge_power}kW "
+            f"eff={self.eff:.4f} usable={self.usable_kwh:.3f}kWh)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Optimisation — Dynamic Programming
 # ---------------------------------------------------------------------------
 
 def _optimize_schedule(
     prices: list[dict],
-    capacity: float,
-    power: float,
-    min_soc: int,
-    max_soc: int,
+    battery: BatteryModel,
     min_profit_eur: float = 0.0,
     initial_soc_pct: float | None = None,
-    rte: int = 100,
     discharge_usage_power: float = DEFAULT_DISCHARGE_USAGE_POWER,
     daylight_mask: list[bool] | None = None,
 ) -> list[dict]:
     """
     Globally optimal charge/discharge schedule via backward dynamic programming.
 
-    Four actions per slot
-    ---------------------
-    charge_grid     : pay buy_price  × grid_kwh_in          (always available)
-    charge_solar    : pay return_price × grid_kwh_in         (daylight hours only)
-    discharge_net   : earn return_price × grid_kwh_out       (always available)
-    discharge_usage : earn buy_price  × grid_kwh_out_usage   (always; reduced power)
+    State space : (hour t, SoC grid index s)
+    SoC grid    : N points spanning [0, usable_kwh] in SOC_STEP_KWH increments
 
-    RTE model (symmetric half-loss)
-    --------------------------------
-    half_loss     = (1 − RTE/100) / 2
-    charge_eff    = 1 / (1 + half_loss)   — fraction of grid draw stored
-    discharge_eff = 1 − half_loss          — fraction of battery release delivered
+    Four actions per slot:
+      charge_grid     — pay buy_price  × charge_kwh_per_hour   (always)
+      charge_solar    — pay return_price × charge_kwh_per_hour  (daylight only)
+      discharge_net   — earn return_price × discharge_kwh_per_hour (always)
+      discharge_usage — earn buy_price × usage_kwh_per_hour    (always, reduced power)
 
-    charge_solar is cheaper than charge_grid (return_price < buy_price), so the DP
-    naturally prefers it during daylight.  discharge_usage earns buy_price > return_price
-    but at reduced power — the DP weighs the opportunity cost of slower discharge
-    against potentially better prices later.
+    All per-hour grid-side and battery-side quantities are derived from
+    BatteryModel, which is built from the two measured energy values.
     """
     if not prices:
         return []
 
     T = len(prices)
-    soc_min_kwh = capacity * min_soc / 100.0
-    soc_max_kwh = capacity * max_soc / 100.0
-    usable_kwh  = soc_max_kwh - soc_min_kwh
-
-    if usable_kwh < 0.01:
+    if battery.usable_kwh < 0.01:
         _LOGGER.warning("Usable capacity near zero — all IDLE")
         return [{**p, "action": ACTION_IDLE, "kwh": 0.0, "partial": False} for p in prices]
 
     if daylight_mask is None:
-        daylight_mask = [True] * T  # no sun entity available — allow solar in all slots
+        daylight_mask = [True] * T
 
-    # ── RTE ──────────────────────────────────────────────────────────────────
-    half_loss     = (1.0 - max(0.01, min(1.0, rte / 100.0))) / 2.0
-    charge_eff    = 1.0 / (1.0 + half_loss)
-    discharge_eff = 1.0 - half_loss
-
-    # ── SoC grid ─────────────────────────────────────────────────────────────
+    eff  = battery.eff
     step = SOC_STEP_KWH
-    # Battery-side kWh per charge/discharge action
-    charge_soc_steps         = max(1, round(power * charge_eff / step))
-    discharge_soc_steps      = max(1, round(power / discharge_eff / step))
-    discharge_usage_soc_steps = max(1, round(discharge_usage_power / discharge_eff / step))
+    N    = max(2, round(battery.usable_kwh / step)) + 1
+    step = battery.usable_kwh / (N - 1)
 
-    N    = max(2, round(usable_kwh / step)) + 1
-    step = usable_kwh / (N - 1)
+    # Battery-side SoC steps per action at rated power
+    charge_steps        = max(1, round(battery.charge_soc_per_hour    / step))
+    discharge_steps     = max(1, round(battery.discharge_soc_per_hour / step))
+    # discharge_usage: battery drains at usage_power / eff per hour
+    usage_soc_per_hour  = discharge_usage_power / eff
+    usage_steps         = max(1, round(usage_soc_per_hour / step))
+
+    # Grid-side kWh per step (for cost/revenue calculation)
+    charge_grid_kwh_per_step    = step / eff          # kWh drawn per battery-step charged
+    discharge_grid_kwh_per_step = step * eff           # kWh delivered per battery-step discharged
 
     buy_eur_kwh    = [p["price"]        / 1000.0 for p in prices]
     return_eur_kwh = [p["return_price"] / 1000.0 for p in prices]
@@ -383,38 +342,30 @@ def _optimize_schedule(
             best_val = val_next[s]
             best_act = ACTION_IDLE
 
-            # ── CHARGE_GRID: pay buy_price per kWh drawn from grid ────────────
-            steps_up = min(charge_soc_steps, N - 1 - s)
+            steps_up = min(charge_steps, N - 1 - s)
             if steps_up > 0:
-                soc_delta   = steps_up * step
-                grid_kwh_in = soc_delta / charge_eff
-                v = -buy * grid_kwh_in + val_next[s + steps_up]
+                grid_in = steps_up * charge_grid_kwh_per_step
+                # charge_grid
+                v = -buy * grid_in + val_next[s + steps_up]
                 if v > best_val:
                     best_val, best_act = v, ACTION_CHARGE_GRID
+                # charge_solar (daylight only — cheaper opportunity cost)
+                if is_day:
+                    v = -ret * grid_in + val_next[s + steps_up]
+                    if v > best_val:
+                        best_val, best_act = v, ACTION_CHARGE_SOLAR
 
-            # ── CHARGE_SOLAR: same SoC transition, but cheaper (return_price) ─
-            if is_day and steps_up > 0:
-                soc_delta   = steps_up * step
-                grid_kwh_in = soc_delta / charge_eff   # physical draw unchanged
-                v = -ret * grid_kwh_in + val_next[s + steps_up]
-                if v > best_val:
-                    best_val, best_act = v, ACTION_CHARGE_SOLAR
-
-            # ── DISCHARGE_NET: earn return_price per kWh delivered ────────────
-            steps_dn = min(discharge_soc_steps, s)
+            steps_dn = min(discharge_steps, s)
             if steps_dn > 0:
-                soc_delta    = steps_dn * step
-                grid_kwh_out = soc_delta * discharge_eff
-                v = ret * grid_kwh_out + val_next[s - steps_dn]
+                grid_out = steps_dn * discharge_grid_kwh_per_step
+                v = ret * grid_out + val_next[s - steps_dn]
                 if v > best_val:
                     best_val, best_act = v, ACTION_DISCHARGE_NET
 
-            # ── DISCHARGE_USAGE: earn buy_price, reduced power ────────────────
-            steps_du = min(discharge_usage_soc_steps, s)
+            steps_du = min(usage_steps, s)
             if steps_du > 0:
-                soc_delta    = steps_du * step
-                grid_kwh_out = soc_delta * discharge_eff
-                v = buy * grid_kwh_out + val_next[s - steps_du]
+                grid_out = steps_du * discharge_grid_kwh_per_step
+                v = buy * grid_out + val_next[s - steps_du]
                 if v > best_val:
                     best_val, best_act = v, ACTION_DISCHARGE_USAGE
 
@@ -424,95 +375,88 @@ def _optimize_schedule(
         val_next = val_cur
 
     # ── Forward pass ─────────────────────────────────────────────────────────
-    if initial_soc_pct is not None:
-        init_kwh = capacity * max(float(min_soc), min(float(max_soc), float(initial_soc_pct))) / 100.0
-    else:
-        init_kwh = soc_min_kwh
+    init_kwh = battery.soc_to_kwh(initial_soc_pct) if initial_soc_pct is not None else 0.0
+    soc_kwh  = init_kwh
 
-    soc_kwh     = init_kwh
     raw_actions: list[str]  = []
     raw_kwh:    list[float] = []
 
     for t in range(T):
-        s   = min(N - 1, max(0, round((soc_kwh - soc_min_kwh) / step)))
+        s   = min(N - 1, max(0, round(soc_kwh / step)))
         act = policy[t][s]
         raw_actions.append(act)
 
         if act in CHARGE_ACTIONS:
-            steps_up    = min(charge_soc_steps, N - 1 - s)
-            soc_delta   = steps_up * step
-            grid_kwh_in = soc_delta / charge_eff
-            soc_kwh     = min(soc_max_kwh, soc_kwh + soc_delta)
-            raw_kwh.append(round(grid_kwh_in, 3))
+            su       = min(charge_steps, N - 1 - s)
+            grid_in  = su * charge_grid_kwh_per_step
+            soc_kwh  = min(battery.usable_kwh, soc_kwh + su * step)
+            raw_kwh.append(round(grid_in, 3))
         elif act == ACTION_DISCHARGE_NET:
-            steps_dn     = min(discharge_soc_steps, s)
-            soc_delta    = steps_dn * step
-            grid_kwh_out = soc_delta * discharge_eff
-            soc_kwh      = max(soc_min_kwh, soc_kwh - soc_delta)
-            raw_kwh.append(round(grid_kwh_out, 3))
+            sd       = min(discharge_steps, s)
+            grid_out = sd * discharge_grid_kwh_per_step
+            soc_kwh  = max(0.0, soc_kwh - sd * step)
+            raw_kwh.append(round(grid_out, 3))
         elif act == ACTION_DISCHARGE_USAGE:
-            steps_du     = min(discharge_usage_soc_steps, s)
-            soc_delta    = steps_du * step
-            grid_kwh_out = soc_delta * discharge_eff
-            soc_kwh      = max(soc_min_kwh, soc_kwh - soc_delta)
-            raw_kwh.append(round(grid_kwh_out, 3))
+            su2      = min(usage_steps, s)
+            grid_out = su2 * discharge_grid_kwh_per_step
+            soc_kwh  = max(0.0, soc_kwh - su2 * step)
+            raw_kwh.append(round(grid_out, 3))
         else:
             raw_kwh.append(0.0)
 
     if min_profit_eur > 0.0:
         raw_actions, raw_kwh = _apply_min_profit_filter(
             raw_actions, raw_kwh, buy_eur_kwh, return_eur_kwh,
-            power, min_profit_eur, usable_kwh, charge_eff, discharge_eff,
+            min_profit_eur, eff,
         )
 
-    # nominal grid-side power for partial detection
-    nominal = {
-        ACTION_CHARGE_GRID:     power / charge_eff,
-        ACTION_CHARGE_SOLAR:    power / charge_eff,
-        ACTION_DISCHARGE_NET:   power * discharge_eff,
-        ACTION_DISCHARGE_USAGE: discharge_usage_power * discharge_eff,
-    }
+    nom_charge    = battery.charge_kwh_per_hour
+    nom_discharge = battery.discharge_kwh_per_hour
+    nom_usage     = discharge_usage_power
 
     return [{
         **prices[t],
         "action":  raw_actions[t],
         "kwh":     raw_kwh[t],
-        "partial": (raw_actions[t] != ACTION_IDLE
-                    and raw_kwh[t] < nominal.get(raw_actions[t], power) - 0.01),
+        "partial": (
+            raw_actions[t] != ACTION_IDLE
+            and raw_kwh[t] < (
+                nom_charge if raw_actions[t] in CHARGE_ACTIONS
+                else nom_usage if raw_actions[t] == ACTION_DISCHARGE_USAGE
+                else nom_discharge
+            ) - 0.01
+        ),
     } for t in range(T)]
 
+
+# ---------------------------------------------------------------------------
+# Profit filter
+# ---------------------------------------------------------------------------
 
 def _apply_min_profit_filter(
     actions: list[str],
     kwh: list[float],
     buy_eur_kwh: list[float],
     return_eur_kwh: list[float],
-    power_kwh: float,
     min_profit_eur_per_kwh: float,
-    usable_kwh: float,
-    charge_eff: float = 1.0,
-    discharge_eff: float = 1.0,
+    eff: float,
 ) -> tuple[list[str], list[float]]:
     """
-    Suppress charge/discharge cycles whose effective spread after RTE losses
-    is below min_profit_eur_per_kwh.
+    Suppress cycles whose effective spread after efficiency losses is below threshold.
 
-    Effective spread = avg_sell_price × discharge_eff − avg_buy_price / charge_eff
+    charge_grid  cost  = buy_price   / eff  (per kWh stored)
+    charge_solar cost  = return_price / eff  (opportunity cost per kWh stored)
+    discharge_net rev  = return_price × eff  (per kWh released)
+    discharge_usage rev = buy_price  × eff  (per kWh released)
 
-    Charge actions (both grid and solar) use their respective tariff for cost:
-      charge_grid  → buy_price / charge_eff
-      charge_solar → return_price / charge_eff  (opportunity cost)
-    Discharge actions use their respective tariff for revenue:
-      discharge_net   → return_price × discharge_eff
-      discharge_usage → buy_price × discharge_eff
+    Pairs each charge block with the best-spread following discharge block
+    (not just the nearest) to avoid micro-cycles masking the real arbitrage window.
 
-    # TODO: consider separate min_profit thresholds per action type
-    #       (e.g. lower threshold for solar charge since degradation cost is the
-    #        main concern, not price arbitrage)
+    # TODO: separate min_profit thresholds per action type
     """
     T = len(actions)
 
-    def get_blocks_from(acts, targets):
+    def get_blocks(acts, targets):
         blocks, i = [], 0
         while i < T:
             if acts[i] in targets:
@@ -525,63 +469,46 @@ def _apply_min_profit_filter(
                 i += 1
         return blocks
 
-    def avg_effective_charge_cost(start, end):
-        """Average cost per kWh stored, accounting for which charge action and tariff."""
+    def charge_cost(start, end):
         costs = []
         for h in range(start, end):
-            # charge_solar opportunity cost is return_price; charge_grid costs buy_price
             tariff = return_eur_kwh[h] if actions[h] == ACTION_CHARGE_SOLAR else buy_eur_kwh[h]
-            costs.append(tariff / charge_eff)
+            costs.append(tariff / eff)
         return sum(costs) / len(costs)
 
-    def avg_effective_discharge_revenue(start, end):
-        """Average revenue per kWh released, accounting for which discharge action."""
+    def discharge_rev(start, end):
         revs = []
         for h in range(start, end):
             tariff = buy_eur_kwh[h] if actions[h] == ACTION_DISCHARGE_USAGE else return_eur_kwh[h]
-            revs.append(tariff * discharge_eff)
+            revs.append(tariff * eff)
         return sum(revs) / len(revs)
 
     suppress: set[int] = set()
 
-    # ── Pass 1: charge → discharge pairs ─────────────────────────────────────
-    # Pair each charge block with the following discharge block that gives the
-    # highest effective spread — not just the nearest one.  This prevents a
-    # small micro-cycle immediately after a charge block from being chosen as
-    # the pair, causing the real profitable discharge window to be orphaned.
-    charge_blocks    = get_blocks_from(actions, CHARGE_ACTIONS)
-    discharge_blocks = get_blocks_from(actions, DISCHARGE_ACTIONS)
+    # ── Pass 1: charge → best discharge ──────────────────────────────────────
+    charge_blocks    = get_blocks(actions, CHARGE_ACTIONS)
+    discharge_blocks = get_blocks(actions, DISCHARGE_ACTIONS)
     used_discharge: set[int] = set()
 
-    for cb_start, cb_end in charge_blocks:
-        # Find all following discharge blocks and pick the one with best spread
+    for cb_s, cb_e in charge_blocks:
         candidates = [
-            (idx, db_start, db_end)
-            for idx, (db_start, db_end) in enumerate(discharge_blocks)
-            if db_start >= cb_end and idx not in used_discharge
+            (i, db_s, db_e)
+            for i, (db_s, db_e) in enumerate(discharge_blocks)
+            if db_s >= cb_e and i not in used_discharge
         ]
-
         if not candidates:
-            suppress.update(range(cb_start, cb_end))
+            suppress.update(range(cb_s, cb_e))
             continue
 
-        best_match = max(
-            candidates,
-            key=lambda c: avg_effective_discharge_revenue(c[1], c[2]) - avg_effective_charge_cost(cb_start, cb_end),
-        )
-        didx, db_start, db_end = best_match
-        spread = avg_effective_discharge_revenue(db_start, db_end) - avg_effective_charge_cost(cb_start, cb_end)
+        best = max(candidates, key=lambda c: discharge_rev(c[1], c[2]) - charge_cost(cb_s, cb_e))
+        didx, db_s, db_e = best
+        spread = discharge_rev(db_s, db_e) - charge_cost(cb_s, cb_e)
 
-        _LOGGER.debug(
-            "charge→discharge: cost=%.4f sell=%.4f effective_spread=%.4f vs min=%.4f EUR/kWh",
-            avg_effective_charge_cost(cb_start, cb_end),
-            avg_effective_discharge_revenue(db_start, db_end),
-            spread, min_profit_eur_per_kwh,
-        )
+        _LOGGER.debug("charge→discharge spread=%.4f vs min=%.4f", spread, min_profit_eur_per_kwh)
 
         if spread < min_profit_eur_per_kwh:
-            suppress.update(range(cb_start, cb_end))
-            suppress.update(range(db_start, db_end))
+            suppress.update(range(cb_s, cb_e))
+            suppress.update(range(db_s, db_e))
         else:
             used_discharge.add(didx)
 
@@ -590,33 +517,28 @@ def _apply_min_profit_filter(
     for h in suppress:
         working[h] = ACTION_IDLE
 
-    discharge_blocks2 = get_blocks_from(working, DISCHARGE_ACTIONS)
-    charge_blocks2    = get_blocks_from(working, CHARGE_ACTIONS)
+    discharge_blocks2 = get_blocks(working, DISCHARGE_ACTIONS)
+    charge_blocks2    = get_blocks(working, CHARGE_ACTIONS)
     used_charge: set[int] = set()
 
-    for db_start, db_end in discharge_blocks2:
-        match = None
-        for idx, (cb_start, cb_end) in enumerate(charge_blocks2):
-            if cb_start >= db_end and idx not in used_charge:
-                match = (idx, cb_start, cb_end)
-                break
-
-        if match is None:
+    for db_s, db_e in discharge_blocks2:
+        candidates = [
+            (i, cb_s, cb_e)
+            for i, (cb_s, cb_e) in enumerate(charge_blocks2)
+            if cb_s >= db_e and i not in used_charge
+        ]
+        if not candidates:
             continue
 
-        cidx, cb_start, cb_end = match
-        spread = avg_effective_discharge_revenue(db_start, db_end) - avg_effective_charge_cost(cb_start, cb_end)
+        best = max(candidates, key=lambda c: discharge_rev(db_s, db_e) - charge_cost(c[1], c[2]))
+        cidx, cb_s, cb_e = best
+        spread = discharge_rev(db_s, db_e) - charge_cost(cb_s, cb_e)
 
-        _LOGGER.debug(
-            "discharge→charge: sell=%.4f cost=%.4f effective_spread=%.4f vs min=%.4f EUR/kWh",
-            avg_effective_discharge_revenue(db_start, db_end),
-            avg_effective_charge_cost(cb_start, cb_end),
-            spread, min_profit_eur_per_kwh,
-        )
+        _LOGGER.debug("discharge→charge spread=%.4f vs min=%.4f", spread, min_profit_eur_per_kwh)
 
         if spread < min_profit_eur_per_kwh:
-            suppress.update(range(db_start, db_end))
-            suppress.update(range(cb_start, cb_end))
+            suppress.update(range(db_s, db_e))
+            suppress.update(range(cb_s, cb_e))
         else:
             used_charge.add(cidx)
 
@@ -628,42 +550,38 @@ def _apply_min_profit_filter(
     return result_actions, result_kwh
 
 
+# ---------------------------------------------------------------------------
+# Savings
+# ---------------------------------------------------------------------------
+
 def _calc_savings(schedule: list[dict]) -> dict:
     cost = revenue = 0.0
     for h in schedule:
-        buy_kwh    = h["price"]        / 1000.0
-        return_kwh = h["return_price"] / 1000.0
-        act        = h["action"]
-        kwh        = h["kwh"]
-        if act == ACTION_CHARGE_GRID:
-            cost    += buy_kwh * kwh
-        elif act == ACTION_CHARGE_SOLAR:
-            cost    += return_kwh * kwh   # opportunity cost at return tariff
-        elif act == ACTION_DISCHARGE_NET:
-            revenue += return_kwh * kwh
-        elif act == ACTION_DISCHARGE_USAGE:
-            revenue += buy_kwh * kwh      # saving on import at buy tariff
-    return {
-        "cost":    round(cost, 3),
-        "revenue": round(revenue, 3),
-        "net":     round(revenue - cost, 3),
-    }
+        buy = h["price"]        / 1000.0
+        ret = h["return_price"] / 1000.0
+        act = h["action"]
+        kwh = h["kwh"]
+        if   act == ACTION_CHARGE_GRID:     cost    += buy * kwh
+        elif act == ACTION_CHARGE_SOLAR:    cost    += ret * kwh
+        elif act == ACTION_DISCHARGE_NET:   revenue += ret * kwh
+        elif act == ACTION_DISCHARGE_USAGE: revenue += buy * kwh
+    return {"cost": round(cost, 3), "revenue": round(revenue, 3), "net": round(revenue - cost, 3)}
 
 
 # ---------------------------------------------------------------------------
-# Zendure helpers — read only
+# Zendure helper
 # ---------------------------------------------------------------------------
 
-def _read_number(hass: HomeAssistant, entity_id: str | None, fallback: float) -> float:
+def _read_soc(hass: HomeAssistant, entity_id: str) -> float | None:
     if not entity_id:
-        return fallback
+        return None
     state = hass.states.get(entity_id)
     if state is None or state.state in ("unavailable", "unknown", None):
-        return fallback
+        return None
     try:
         return float(state.state)
     except (ValueError, TypeError):
-        return fallback
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -672,111 +590,60 @@ def _read_number(hass: HomeAssistant, entity_id: str | None, fallback: float) ->
 
 class BatteryOptimizerCoordinator(DataUpdateCoordinator):
     """
-    Read prices from a HA sensor and compute optimal dispatch schedule.
+    Reads prices and computes optimal dispatch schedule.
 
-    Zendure integration (all entities optional — guidance only, no writes)
-    ----------------------------------------------------------------------
-    READ on every refresh:
-      • zen_soc_entity                sensor  → starting SoC for the DP optimiser
-      • zen_soc_min_entity            number  → overrides manual min_soc
-      • zen_soc_max_entity            number  → overrides manual max_soc
-      • zen_inverse_max_power_entity  sensor  → overrides manual power (W → kW)
+    Battery parameters are derived from two measured energy values
+    (charge_energy, discharge_energy) rather than capacity + SoC limits + RTE.
+    The only optional HA entity read is zen_soc_entity for live SoC%.
 
-    Updates are driven by two listeners (no polling):
-      1. async_track_state_change_event on the price entity
-      2. async_track_time_change at :00 each hour
+    Updates driven by:
+      1. Price sensor state change
+      2. Hourly tick at :00
     """
 
     def __init__(
         self,
         hass: HomeAssistant,
         price_entity_id: str,
-        capacity: float,
-        power: float,
-        min_soc: int,
-        max_soc: int,
+        charge_energy: float,
+        discharge_energy: float,
+        charge_power: float,
+        discharge_power: float,
         min_profit: float = 0.0,
-        rte: int = 100,
         discharge_usage_power: float = DEFAULT_DISCHARGE_USAGE_POWER,
         return_price_formula: str = DEFAULT_RETURN_PRICE_FORMULA,
-        # Zendure entities (all optional — pass None to disable)
         zen_soc_entity: str | None = None,
-        zen_soc_min_entity: str | None = None,
-        zen_soc_max_entity: str | None = None,
-        zen_inverse_max_power_entity: str | None = None,
     ) -> None:
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=DOMAIN,
-            update_interval=None,
-        )
+        super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None)
         self.price_entity_id      = price_entity_id
-        self._capacity            = capacity
-        self._power               = power
-        self._min_soc             = min_soc
-        self._max_soc             = max_soc
+        self.battery              = BatteryModel(charge_energy, discharge_energy, charge_power, discharge_power)
         self.min_profit           = min_profit
-        self._rte                 = rte
         self._discharge_usage_power = discharge_usage_power
         self._return_price_formula  = return_price_formula
-        self.zen_soc_entity               = zen_soc_entity or ""
-        self.zen_soc_min_entity           = zen_soc_min_entity or ""
-        self.zen_soc_max_entity           = zen_soc_max_entity or ""
-        self.zen_inverse_max_power_entity = zen_inverse_max_power_entity or ""
-        self._unsub_state: list = []
+        self.zen_soc_entity         = zen_soc_entity or ""
+        self._unsub_state: list     = []
 
-    # ── Properties ────────────────────────────────────────────────────────────
-
-    @property
-    def capacity(self) -> float:
-        return self._capacity
-
-    @property
-    def power(self) -> float:
-        return _read_number(self.hass, self.zen_inverse_max_power_entity, self._power * 1000) / 1000
-
-    @property
-    def min_soc(self) -> int:
-        return int(_read_number(self.hass, self.zen_soc_min_entity, self._min_soc))
-
-    @property
-    def max_soc(self) -> int:
-        return int(_read_number(self.hass, self.zen_soc_max_entity, self._max_soc))
-
-    @property
-    def current_soc(self) -> float | None:
-        if not self.zen_soc_entity:
-            return None
-        return _read_number(self.hass, self.zen_soc_entity, None)
+        _LOGGER.debug("Coordinator initialised: %s", self.battery)
 
     # ── Listeners ─────────────────────────────────────────────────────────────
 
     async def async_setup(self) -> None:
         @callback
-        def _on_price_sensor_update(event: Event) -> None:
-            new_state = event.data.get("new_state")
-            old_state = event.data.get("old_state")
-            if new_state is None:
+        def _on_price_change(event: Event) -> None:
+            ns = event.data.get("new_state")
+            os = event.data.get("old_state")
+            if ns is None:
                 return
-            if (
-                old_state is not None
-                and new_state.attributes == old_state.attributes
-                and new_state.state == old_state.state
-            ):
+            if os and ns.attributes == os.attributes and ns.state == os.state:
                 return
-            _LOGGER.debug("Price sensor %s changed — refreshing", self.price_entity_id)
             self.hass.async_create_task(self.async_refresh())
 
         @callback
         def _on_new_hour(_now) -> None:
-            _LOGGER.debug("New hour tick — advancing schedule pointer")
             self.hass.async_create_task(self.async_refresh())
 
         self._unsub_state.append(
-            async_track_state_change_event(
-                self.hass, [self.price_entity_id], _on_price_sensor_update,
-            )
+            async_track_state_change_event(self.hass, [self.price_entity_id], _on_price_change)
         )
         self._unsub_state.append(
             async_track_time_change(self.hass, _on_new_hour, minute=0, second=0)
@@ -794,81 +661,66 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         now    = datetime.now(timezone.utc)
         now_ts = now.timestamp()
 
-        # ── 1. Fetch prices ───────────────────────────────────────────────────
+        # 1. Prices
         state_obj = self.hass.states.get(self.price_entity_id)
         if state_obj is None:
-            raise UpdateFailed(
-                f"Price sensor '{self.price_entity_id}' not found. "
-                "Check the entity ID in the integration settings."
-            )
+            raise UpdateFailed(f"Price sensor '{self.price_entity_id}' not found")
         try:
             prices = _extract_prices(state_obj, self._return_price_formula)
         except ValueError as err:
             raise UpdateFailed(str(err)) from err
 
-        # ── 2. Build daylight mask ────────────────────────────────────────────
+        # 2. Daylight mask
         daylight_mask = [_is_daylight(self.hass, p["ts"]) for p in prices]
 
-        # ── 3. Read live Zendure values ───────────────────────────────────────
-        live_min_soc  = self.min_soc
-        live_max_soc  = self.max_soc
-        live_power_kw = self.power
-        live_soc      = self.current_soc
+        # 3. Live SoC
+        live_soc = _read_soc(self.hass, self.zen_soc_entity)
+        _LOGGER.debug("Live SoC: %s%%", live_soc)
 
-        _LOGGER.debug(
-            "Zendure — SoC: %s%% | power: %.1fkW | SoC range: %d%%–%d%%",
-            live_soc, live_power_kw, live_min_soc, live_max_soc,
-        )
-
-        # ── 4. Optimise ───────────────────────────────────────────────────────
+        # 4. Optimise
         schedule = _optimize_schedule(
             prices,
-            self._capacity,
-            live_power_kw,
-            live_min_soc,
-            live_max_soc,
+            self.battery,
             self.min_profit,
             initial_soc_pct=live_soc,
-            rte=self._rte,
             discharge_usage_power=self._discharge_usage_power,
             daylight_mask=daylight_mask,
         )
         savings = _calc_savings(schedule)
 
-        # ── 5. Derive current-hour values ─────────────────────────────────────
+        # 5. Derive current-hour values
         current = next(
             (h for h in schedule if h["ts"] <= now_ts < h["ts"] + 3600),
             schedule[0],
         )
-        next_different = next(
+        next_diff = next(
             (h for h in schedule if h["ts"] > current["ts"] and h["action"] != current["action"]),
             None,
         )
         next_charge = next(
-            (h for h in schedule if h["ts"] >= now_ts and h["action"] in CHARGE_ACTIONS),
-            None,
+            (h for h in schedule if h["ts"] >= now_ts and h["action"] in CHARGE_ACTIONS), None
         )
         next_discharge = next(
-            (h for h in schedule if h["ts"] >= now_ts and h["action"] in DISCHARGE_ACTIONS),
-            None,
+            (h for h in schedule if h["ts"] >= now_ts and h["action"] in DISCHARGE_ACTIONS), None
         )
 
         return {
-            "schedule":          schedule,
-            "savings":           savings,
-            "current_action":    current["action"],
-            "current_price":     current["price"],
+            "schedule":             schedule,
+            "savings":              savings,
+            "current_action":       current["action"],
+            "current_price":        current["price"],
             "current_return_price": current["return_price"],
-            "current_hour":      current["hour"],
-            "next_action":       next_different["action"] if next_different else current["action"],
-            "next_action_at":    next_different["hour"]   if next_different else None,
-            "next_charge_at":    next_charge["hour"]      if next_charge    else None,
-            "next_discharge_at": next_discharge["hour"]   if next_discharge else None,
-            "price_entity":      self.price_entity_id,
-            "price_unit":        "EUR/MWh (normalised)",
-            "zendure_soc":       live_soc,
-            "zendure_min_soc":   live_min_soc,
-            "zendure_max_soc":   live_max_soc,
-            "zendure_power_kw":  round(live_power_kw, 2),
-            "last_updated":      now.isoformat(),
+            "current_hour":         current["hour"],
+            "next_action":          next_diff["action"] if next_diff else current["action"],
+            "next_action_at":       next_diff["hour"]   if next_diff else None,
+            "next_charge_at":       next_charge["hour"]    if next_charge    else None,
+            "next_discharge_at":    next_discharge["hour"] if next_discharge else None,
+            "price_entity":         self.price_entity_id,
+            "zendure_soc":          live_soc,
+            "last_updated":         now.isoformat(),
+            # Expose derived battery info for sensors
+            "battery_charge_time":    round(self.battery.charge_time, 2),
+            "battery_discharge_time": round(self.battery.discharge_time, 2),
+            "battery_usable_kwh":     round(self.battery.usable_kwh, 3),
+            "battery_eff":            round(self.battery.eff, 4),
         }
