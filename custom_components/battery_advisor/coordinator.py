@@ -527,7 +527,17 @@ def _apply_min_profit_filter(
     charge_blocks2    = get_blocks(working, CHARGE_ACTIONS)
     used_charge: set[int] = set()
 
+    # Build set of discharge block index ranges already kept in Pass 1
+    # so Pass 2 doesn't re-evaluate or suppress them
+    kept_discharge_ranges: set[tuple] = set()
+    for didx in used_discharge:
+        kept_discharge_ranges.add(discharge_blocks[didx])
+
     for db_s, db_e in discharge_blocks2:
+        # Skip if this block was already validated in Pass 1
+        if (db_s, db_e) in kept_discharge_ranges:
+            continue
+
         candidates = [
             (i, cb_s, cb_e)
             for i, (cb_s, cb_e) in enumerate(charge_blocks2)
@@ -681,18 +691,31 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
 
         # 3. Live SoC
         live_soc = _read_soc(self.hass, self.zen_soc_entity)
-        _LOGGER.debug("Live SoC: %s%%", live_soc)
+        _LOGGER.warning(
+            "DIAG v3 — zen_soc_entity=%r live_soc=%s slots=%d min_profit=%.3f",
+            self.zen_soc_entity, live_soc, len(prices), self.min_profit,
+        )
 
         # 4. Optimise
-        schedule = _optimize_schedule(
-            prices,
-            self.battery,
-            self.min_profit,
-            initial_soc_pct=live_soc,
-            discharge_usage_power=self._discharge_usage_power,
-            daylight_mask=daylight_mask,
-        )
+        try:
+            schedule = _optimize_schedule(
+                prices,
+                self.battery,
+                self.min_profit,
+                initial_soc_pct=live_soc,
+                discharge_usage_power=self._discharge_usage_power,
+                daylight_mask=daylight_mask,
+            )
+        except Exception as err:
+            _LOGGER.error("DIAG v3 — _optimize_schedule raised: %s", err, exc_info=True)
+            raise UpdateFailed(f"Optimisation failed: {err}") from err
         savings = _calc_savings(schedule)
+        _LOGGER.warning(
+            "DIAG v3 — schedule active slots=%d  savings=€%.2f  initial_soc=%s%%",
+            sum(1 for h in schedule if h["action"] != ACTION_IDLE),
+            savings["net"],
+            live_soc,
+        )
 
         # 5. Derive current-hour values
         current = next(
