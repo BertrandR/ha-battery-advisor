@@ -375,7 +375,13 @@ def _optimize_schedule(
         val_next = val_cur
 
     # ── Forward pass ─────────────────────────────────────────────────────────
-    init_kwh = battery.soc_to_kwh(initial_soc_pct) if initial_soc_pct is not None else 0.0
+    init_kwh = battery.soc_to_kwh(initial_soc_pct) if initial_soc_pct is not None else battery.usable_kwh * 0.5
+    if initial_soc_pct is None:
+        _LOGGER.warning(
+            "No live SoC available — assuming 50%% (%.2f kWh). "
+            "Configure a Zendure SoC entity for accurate scheduling.",
+            battery.usable_kwh * 0.5,
+        )
     soc_kwh  = init_kwh
 
     raw_actions: list[str]  = []
