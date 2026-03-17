@@ -3,20 +3,20 @@
 Reads hourly electricity prices from an **existing HA sensor** and computes an
 optimal charge/discharge schedule for your home battery using dynamic programming.
 
-No external API calls. Works with Nordpool (official & HACS), Tibber, and any
-sensor exposing hourly prices as attributes.
+No external API calls. Supports Nordpool, Zonneplan ONE, Tibber, and any sensor
+exposing hourly prices as attributes. Automatically uses buy and return tariffs
+separately when available (e.g. Zonneplan `electricity_price_excl_tax`).
 
 ---
 
 ## Supported price sensors
 
-| Integration | Sensor | Format detected |
-|-------------|--------|----------------|
-| **Nord Pool** (official, built-in) | `sensor.nordpool_...` | `raw_today` / `raw_tomorrow` attributes |
-| **Nord Pool** (HACS custom component) | `sensor.nordpool_...` | `raw_today` / `raw_tomorrow` attributes |
-| **Zonneplan ONE** (HACS) | `sensor.zonneplan_current_electricity_tariff` | `forecast` attribute with `{datetime, electricity_price}` list |
-| **Tibber** (HACS) | `sensor.tibber_...` | `prices` attribute with `{startsAt, total}` list |
-| **Generic** | any | `today`, `prices`, or `hourly_prices` attribute with a list of floats |
+| Integration | Sensor | Return tariff |
+|---|---|---|
+| **Nord Pool** (official / HACS) | `sensor.nordpool_...` | Derived via formula (e.g. `current_price / 1.21`) |
+| **Zonneplan ONE** (HACS) | `sensor.zonneplan_current_electricity_tariff` | Native `electricity_price_excl_tax` (auto) |
+| **Tibber** (HACS) | `sensor.tibber_...` | Derived via formula |
+| **Generic** | any sensor with `today` / `prices` / `hourly_prices` float list | Derived via formula |
 
 Prices are auto-normalised to EUR/MWh regardless of source unit.
 
@@ -24,85 +24,93 @@ Prices are auto-normalised to EUR/MWh regardless of source unit.
 
 ## Installation
 
-1. Copy the `custom_components/battery_advisor/` folder to:
-   ```
-   /config/custom_components/battery_advisor/
-   ```
+### HACS
+Add this repository as a custom repository in HACS, then install **Battery Dispatch Advisor**.
 
-2. Restart Home Assistant.
+### Manual
+1. Copy `custom_components/battery_advisor/` to `/config/custom_components/battery_advisor/`
+2. Restart Home Assistant
+3. Go to **Settings → Devices & Services → + Add Integration**, search for **Battery Dispatch Advisor**
 
-3. Go to **Settings → Devices & Services → + Add Integration**,
-   search for **Battery Dispatch Advisor**.
+---
 
-4. Select your **electricity price sensor** from the entity picker,
-   then fill in your battery parameters:
-   - **Battery capacity** (kWh)
-   - **Max charge/discharge power** (kW)
-   - **Min / Max SoC** (%)
-   - **Minimum cycle profit** (EUR) — cycles below this are skipped
+## Configuration
+
+Setup is a four-step flow:
+
+### Step 1 — Price sensor
+- **Price sensor entity** — your day-ahead price sensor
+- **Return price formula** — leave empty to use the sensor's native return tariff (Zonneplan auto-detects `electricity_price_excl_tax`). Set to `current_price` to treat buy and return tariffs as equal. Other examples:
+  - `current_price / 1.21` — strip 21% Dutch VAT
+  - `(current_price - 52.9) / 1.21` — strip flat energy tax then VAT
+
+### Step 2 — Battery
+- **Charge energy** (kWh) — grid-side kWh drawn to go from min to max SoC (measure this)
+- **Discharge energy** (kWh) — grid-side kWh delivered going from max to min SoC (measure this)
+- **Charge power** (kW) — grid-side charge rate
+- **Discharge power** (kW) — grid-side discharge rate
+
+These two energy values replace the old capacity / min SoC / max SoC / RTE settings.
+Efficiency and usable capacity are derived automatically:
+`eff = √(discharge_energy / charge_energy)`, `usable_kwh = charge_energy × eff`
+
+### Step 3 — Schedule
+- **Minimum profit** (EUR/kWh) — suppress cycles below this effective spread after losses (default 0.02)
+- **Discharge-to-usage power** (kW) — assumed drain rate when covering home usage (default 0.3)
+
+### Step 4 — Zendure (optional)
+- **Zendure SoC sensor** — if configured, the live SoC is used as the starting point for the DP optimiser. Leave blank to assume 50%.
 
 ---
 
 ## Sensors created
 
-| Entity | State | Use for |
-|--------|-------|---------|
-| `sensor.battery_advisor_current_action` | `charge` / `discharge` / `idle` | Automation triggers |
-| `sensor.battery_advisor_current_price`  | float (EUR/MWh) | Numeric conditions |
-| `sensor.battery_advisor_next_action`    | `charge` / `discharge` / `idle` | Lookahead |
-| `sensor.battery_advisor_daily_savings`  | float (EUR net) | Dashboard |
-| `sensor.battery_advisor_schedule`       | int (hours)     | Full schedule in attributes |
+| Entity | State | Notes |
+|---|---|---|
+| `sensor.battery_advisor_current_action` | see below | Primary automation trigger |
+| `sensor.battery_advisor_current_price` | EUR/MWh | Buy price; return price in attributes |
+| `sensor.battery_advisor_next_action` | see below | Next scheduled action change |
+| `sensor.battery_advisor_daily_savings` | EUR | Estimated net profit over forecast window |
+| `sensor.battery_advisor_schedule` | int (slot count) | Full schedule + battery info in attributes |
+| `sensor.battery_advisor_battery_soc` | % | Live SoC (only if Zendure entity configured) |
 
-Prices are re-read from the source sensor every hour.
-Tomorrow's prices are automatically included when `tomorrow_valid` is true (Nordpool).
+### Action values
+
+| Value | Meaning |
+|---|---|
+| `charge_grid` | Charge from grid at buy tariff |
+| `charge_solar` | Charge from solar (daylight only) at return tariff opportunity cost |
+| `discharge_net` | Export to grid at return tariff, full discharge power |
+| `discharge_usage` | Cover home usage at buy tariff, reduced power |
+| `idle` | No action |
+
+`charge_solar` is selected during daylight hours (using `sun.sun` entity) when the
+return tariff opportunity cost is lower than the grid buy price.
+`discharge_usage` is selected when the buy tariff significantly exceeds the return
+tariff, making covering home usage more profitable than exporting.
 
 ---
 
 ## Algorithm
 
-The optimizer uses **backward dynamic programming** over the state space
-`(hour, SoC)` to find the globally optimal schedule — correctly handling
-multiple charge/discharge cycles per day, partial charges, and negative prices.
+The optimiser uses **backward dynamic programming** over `(hour, SoC)` state space
+to find the globally optimal schedule across the full forecast window (~35 hours for
+Zonneplan, 24–48 hours for Nordpool).
 
-A **minimum profit filter** then suppresses any cycle whose net
-`revenue − cost` is below your configured threshold, preventing the battery
-from cycling on negligibly small price spreads.
+RTE losses are modelled symmetrically from the measured energy values:
+`eff = √(discharge_energy / charge_energy)`. Charge costs and discharge revenues
+are adjusted accordingly.
+
+A **minimum profit filter** suppresses cycles whose effective spread after losses
+falls below the configured threshold. Each charge block is paired with its
+best-spread discharge block (not just the nearest) to avoid micro-cycles masking
+the main arbitrage window.
 
 ---
 
 ## Automation examples
 
-### Start charging
-
-```yaml
-automation:
-  - alias: "Battery: Start charging"
-    trigger:
-      - platform: state
-        entity_id: sensor.battery_advisor_current_action
-        to: "charge"
-    action:
-      - service: switch.turn_on
-        target:
-          entity_id: switch.battery_charger
-```
-
-### Stop when no longer optimal
-
-```yaml
-automation:
-  - alias: "Battery: Stop charging"
-    trigger:
-      - platform: state
-        entity_id: sensor.battery_advisor_current_action
-        from: "charge"
-    action:
-      - service: switch.turn_off
-        target:
-          entity_id: switch.battery_charger
-```
-
-### Combined charge/discharge handler
+### Four-action handler
 
 ```yaml
 automation:
@@ -115,38 +123,42 @@ automation:
           - conditions:
               - condition: state
                 entity_id: sensor.battery_advisor_current_action
-                state: "charge"
+                state: "charge_grid"
             sequence:
-              - service: switch.turn_on
-                target: { entity_id: switch.battery_charge_mode }
-              - service: switch.turn_off
-                target: { entity_id: switch.battery_discharge_mode }
+              - service: select.select_option
+                target: { entity_id: select.battery_charge_mode }
+                data: { option: "grid" }
           - conditions:
               - condition: state
                 entity_id: sensor.battery_advisor_current_action
-                state: "discharge"
+                state: "charge_solar"
             sequence:
-              - service: switch.turn_off
-                target: { entity_id: switch.battery_charge_mode }
-              - service: switch.turn_on
-                target: { entity_id: switch.battery_discharge_mode }
+              - service: select.select_option
+                target: { entity_id: select.battery_charge_mode }
+                data: { option: "solar" }
+          - conditions:
+              - condition: state
+                entity_id: sensor.battery_advisor_current_action
+                state: "discharge_net"
+            sequence:
+              - service: select.select_option
+                target: { entity_id: select.battery_discharge_mode }
+                data: { option: "grid" }
+          - conditions:
+              - condition: state
+                entity_id: sensor.battery_advisor_current_action
+                state: "discharge_usage"
+            sequence:
+              - service: select.select_option
+                target: { entity_id: select.battery_discharge_mode }
+                data: { option: "usage" }
         default:
-          - service: switch.turn_off
-            target: { entity_id: switch.battery_charge_mode }
-          - service: switch.turn_off
-            target: { entity_id: switch.battery_discharge_mode }
+          - service: select.select_option
+            target: { entity_id: select.battery_mode }
+            data: { option: "idle" }
 ```
 
-### Guard: only charge if price is below threshold
-
-```yaml
-condition:
-  - condition: numeric_state
-    entity_id: sensor.battery_advisor_current_price
-    below: 80   # EUR/MWh
-```
-
-### Template: check any hour's action
+### Check any hour's scheduled action
 
 ```yaml
 {% set schedule = state_attr('sensor.battery_advisor_schedule', 'schedule') %}
@@ -154,10 +166,31 @@ condition:
 {{ (schedule | selectattr('hour', 'eq', h) | list | first).action }}
 ```
 
+### Guard: only act if price is above threshold
+
+```yaml
+condition:
+  - condition: numeric_state
+    entity_id: sensor.battery_advisor_current_price
+    above: 200   # EUR/MWh
+```
+
 ---
 
-## Updating parameters
+## Reconfiguring
 
-**Settings → Devices & Services → Battery Dispatch Advisor → Configure**
-— change sensor, capacity, power, SoC limits or profit threshold at any time
-without reinstalling.
+**Settings → Devices & Services → Battery Advisor → Configure** — update any
+parameter at any time without reinstalling. Changes take effect immediately on save.
+
+---
+
+## Measuring your battery's energy values
+
+The two key config values are best measured empirically:
+
+1. Fully discharge your battery to its minimum SoC
+2. Charge to maximum SoC and note grid draw from your smart meter → **charge energy**
+3. Discharge back to minimum SoC and note grid delivery → **discharge energy**
+
+For a Zendure AIO 2400 with 8.6 kWh nominal capacity, typical values are
+around 7.9 kWh charge energy and 6.44 kWh discharge energy (83% RTE).
