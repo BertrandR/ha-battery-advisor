@@ -219,6 +219,7 @@ class BatteryScheduleSensor(_Base):
             "battery_discharge_time": d.get("battery_discharge_time"),
             "battery_usable_kwh":     d.get("battery_usable_kwh"),
             "battery_eff":            d.get("battery_eff"),
+            "planned_soc":            d.get("planned_soc"),
             "price_entity":           d.get("price_entity"),
             "last_updated":           d.get("last_updated"),
         }

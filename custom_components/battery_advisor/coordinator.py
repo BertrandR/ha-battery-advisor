@@ -674,21 +674,51 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         @callback
         def _on_soc_change(event: Event) -> None:
             ns = event.data.get("new_state")
-            if ns is None or ns.state in ("unavailable", "unknown"):
+            os = event.data.get("old_state")
+            if ns is None:
                 return
+
+            new_unavailable = ns.state in ("unavailable", "unknown", None)
+            old_unavailable = (os is None) or (os.state in ("unavailable", "unknown", None))
+
+            # Re-plan when entity recovers from unavailable — the last plan may
+            # have been computed with a stale/zero SoC.
+            if old_unavailable and not new_unavailable:
+                _LOGGER.debug("SoC entity recovered from unavailable — triggering re-plan")
+                self.hass.async_create_task(self.async_refresh())
+                return
+
+            if new_unavailable:
+                return
+
             try:
                 new_soc = float(ns.state)
             except (ValueError, TypeError):
                 return
-            # Re-plan if this is the first reading or SoC has moved significantly
-            # from the value used for the last plan.
+
             last = self._last_planned_soc
-            if last is None or abs(new_soc - last) >= self.SOC_REPLAN_THRESHOLD:
+
+            # Always re-plan on first reading
+            if last is None:
+                _LOGGER.debug("First SoC reading (%.1f%%) — triggering re-plan", new_soc)
+                self.hass.async_create_task(self.async_refresh())
+                return
+
+            # Re-plan if the last plan used a bad SoC (0 or None-fallback 50%)
+            # and we now have a real reading that differs meaningfully
+            if last <= 1.0 and new_soc >= 5.0:
                 _LOGGER.debug(
-                    "SoC changed from %s%% to %.1f%% (threshold %.0f%%) — triggering re-plan",
-                    f"{last:.1f}" if last is not None else "?",
-                    new_soc,
-                    self.SOC_REPLAN_THRESHOLD,
+                    "Last plan used near-zero SoC (%.1f%%), now reading %.1f%% — triggering re-plan",
+                    last, new_soc,
+                )
+                self.hass.async_create_task(self.async_refresh())
+                return
+
+            # Re-plan if SoC has moved significantly from the last planned value
+            if abs(new_soc - last) >= self.SOC_REPLAN_THRESHOLD:
+                _LOGGER.debug(
+                    "SoC moved from %.1f%% to %.1f%% (≥%.0f%%) — triggering re-plan",
+                    last, new_soc, self.SOC_REPLAN_THRESHOLD,
                 )
                 self.hass.async_create_task(self.async_refresh())
 
@@ -735,18 +765,20 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         # 3. Live SoC
         live_soc = _read_soc(self.hass, self.zen_soc_entity)
 
-        # Guard: if SoC reads 0 but a previous plan used a significantly higher
-        # value, treat the reading as transient/stale and keep the last known value.
-        # Zendure (and similar) occasionally report 0 briefly during comms gaps.
+        # Guard: if SoC reads suspiciously low (≤1%) but a previous plan used a
+        # significantly higher value, treat the reading as transient/stale.
+        # Zendure (and similar) occasionally report 0 briefly during comms gaps
+        # or HA startup, which causes the DP to plan all-idle for the current day.
         if (
             live_soc is not None
-            and live_soc == 0.0
+            and live_soc <= 1.0
             and self._last_planned_soc is not None
             and self._last_planned_soc >= 10.0
         ):
             _LOGGER.warning(
-                "SoC reads 0%% but last planned SoC was %.1f%% — "
+                "SoC reads %.1f%% but last planned SoC was %.1f%% — "
                 "treating as transient read, using last known SoC",
+                live_soc,
                 self._last_planned_soc,
             )
             live_soc = self._last_planned_soc
@@ -809,6 +841,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             "next_discharge_at":    next_discharge["hour"] if next_discharge else None,
             "price_entity":         self.price_entity_id,
             "zendure_soc":          live_soc,
+            "planned_soc":          live_soc,   # SoC actually used for this plan (post-guard)
             "last_updated":         now.isoformat(),
             # Expose derived battery info for sensors
             "battery_charge_time":    round(self.battery.charge_time, 2),
