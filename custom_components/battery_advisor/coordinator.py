@@ -620,9 +620,13 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
     The only optional HA entity read is zen_soc_entity for live SoC%.
 
     Updates driven by:
-      1. Price sensor state change
-      2. Hourly tick at :00
+      1. Price sensor forecast attribute change
+      2. SoC entity change (significant move, ≥ SOC_REPLAN_THRESHOLD %)
+      3. Hourly tick at :00
     """
+
+    # Re-plan when SoC moves by at least this many percentage points
+    SOC_REPLAN_THRESHOLD = 5.0
 
     def __init__(
         self,
@@ -645,6 +649,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         self._return_price_formula  = return_price_formula
         self.zen_soc_entity         = zen_soc_entity or ""
         self._unsub_state: list     = []
+        self._last_planned_soc: float | None = None
 
         _LOGGER.debug("Coordinator initialised: %s", self.battery)
 
@@ -657,9 +662,35 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             os = event.data.get("old_state")
             if ns is None:
                 return
-            if os and ns.attributes == os.attributes and ns.state == os.state:
+            # Only re-plan when the forecast attribute actually changes,
+            # not on every current-price tick (state value change).
+            ns_forecast = (ns.attributes or {}).get("forecast")
+            os_forecast = (os.attributes or {}).get("forecast") if os else None
+            if ns_forecast is not None and ns_forecast == os_forecast:
+                _LOGGER.debug("Price sensor state changed but forecast unchanged — skipping re-plan")
                 return
             self.hass.async_create_task(self.async_refresh())
+
+        @callback
+        def _on_soc_change(event: Event) -> None:
+            ns = event.data.get("new_state")
+            if ns is None or ns.state in ("unavailable", "unknown"):
+                return
+            try:
+                new_soc = float(ns.state)
+            except (ValueError, TypeError):
+                return
+            # Re-plan if this is the first reading or SoC has moved significantly
+            # from the value used for the last plan.
+            last = self._last_planned_soc
+            if last is None or abs(new_soc - last) >= self.SOC_REPLAN_THRESHOLD:
+                _LOGGER.debug(
+                    "SoC changed from %s%% to %.1f%% (threshold %.0f%%) — triggering re-plan",
+                    f"{last:.1f}" if last is not None else "?",
+                    new_soc,
+                    self.SOC_REPLAN_THRESHOLD,
+                )
+                self.hass.async_create_task(self.async_refresh())
 
         @callback
         def _on_new_hour(_now) -> None:
@@ -671,6 +702,11 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         self._unsub_state.append(
             async_track_time_change(self.hass, _on_new_hour, minute=0, second=0)
         )
+        # Track SoC entity if configured
+        if self.zen_soc_entity:
+            self._unsub_state.append(
+                async_track_state_change_event(self.hass, [self.zen_soc_entity], _on_soc_change)
+            )
 
     @callback
     def async_teardown(self) -> None:
@@ -698,9 +734,26 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
 
         # 3. Live SoC
         live_soc = _read_soc(self.hass, self.zen_soc_entity)
-        _LOGGER.warning(
-            "DIAG v3 — zen_soc_entity=%r live_soc=%s slots=%d min_profit=%.3f",
-            self.zen_soc_entity, live_soc, len(prices), self.min_profit,
+
+        # Guard: if SoC reads 0 but a previous plan used a significantly higher
+        # value, treat the reading as transient/stale and keep the last known value.
+        # Zendure (and similar) occasionally report 0 briefly during comms gaps.
+        if (
+            live_soc is not None
+            and live_soc == 0.0
+            and self._last_planned_soc is not None
+            and self._last_planned_soc >= 10.0
+        ):
+            _LOGGER.warning(
+                "SoC reads 0%% but last planned SoC was %.1f%% — "
+                "treating as transient read, using last known SoC",
+                self._last_planned_soc,
+            )
+            live_soc = self._last_planned_soc
+
+        _LOGGER.debug(
+            "Coordinator update — zen_soc_entity=%r live_soc=%s last_planned_soc=%s slots=%d min_profit=%.3f",
+            self.zen_soc_entity, live_soc, self._last_planned_soc, len(prices), self.min_profit,
         )
 
         # 4. Optimise
@@ -714,11 +767,14 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
                 daylight_mask=daylight_mask,
             )
         except Exception as err:
-            _LOGGER.error("DIAG v3 — _optimize_schedule raised: %s", err, exc_info=True)
+            _LOGGER.error("Optimisation failed: %s", err, exc_info=True)
             raise UpdateFailed(f"Optimisation failed: {err}") from err
+
+        # Record SoC used for this plan (for stale-read guard and re-plan trigger)
+        self._last_planned_soc = live_soc
         savings = _calc_savings(schedule)
-        _LOGGER.warning(
-            "DIAG v3 — schedule active slots=%d  savings=€%.2f  initial_soc=%s%%",
+        _LOGGER.debug(
+            "Schedule computed — active slots=%d  savings=€%.2f  initial_soc=%s%%",
             sum(1 for h in schedule if h["action"] != ACTION_IDLE),
             savings["net"],
             live_soc,
