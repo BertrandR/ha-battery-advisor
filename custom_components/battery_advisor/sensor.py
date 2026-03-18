@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
+    CONF_BATTERY_NAME,
     ACTION_CHARGE_GRID, ACTION_CHARGE_SOLAR,
     ACTION_DISCHARGE_GRID, ACTION_DISCHARGE_USAGE,
     ACTION_IDLE,
@@ -45,9 +46,10 @@ def _device(coordinator: BatteryOptimizerCoordinator, entry: ConfigEntry) -> Dev
         f"discharge {b.discharge_energy}kWh/{b.discharge_power}kW  "
         f"eff {b.eff:.0%}"
     )
+    battery_name = entry.data.get(CONF_BATTERY_NAME) or "Battery Advisor"
     return DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)},
-        name="Battery Advisor",
+        name=battery_name,
         manufacturer="Battery Advisor",
         model=model,
         entry_type="service",

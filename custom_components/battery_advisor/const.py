@@ -2,6 +2,9 @@
 
 DOMAIN = "battery_advisor"
 
+# ── Battery name ──────────────────────────────────────────────────────────────
+CONF_BATTERY_NAME   = "battery_name"
+
 # ── Price sensor ─────────────────────────────────────────────────────────────
 CONF_PRICE_ENTITY           = "price_entity_id"
 CONF_RETURN_PRICE_FORMULA   = "return_price_formula"

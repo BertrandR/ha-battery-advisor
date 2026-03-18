@@ -8,6 +8,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     DOMAIN,
+    CONF_BATTERY_NAME,
     CONF_PRICE_ENTITY, CONF_RETURN_PRICE_FORMULA,
     CONF_CHARGE_ENERGY, CONF_DISCHARGE_ENERGY,
     CONF_CHARGE_POWER, CONF_DISCHARGE_POWER,
@@ -27,7 +28,7 @@ _pos_float = lambda v: vol.All(vol.Coerce(float), vol.Range(min=0.01))
 
 def _validate_formula(formula: str) -> bool:
     if not formula:
-        return True   # empty = use native excl-tax (Zonneplan) or buy price (others)
+        return True
     try:
         result = eval(formula, {"__builtins__": {}}, {"current_price": 100.0})  # noqa: S307
         return isinstance(result, (int, float))
@@ -35,20 +36,15 @@ def _validate_formula(formula: str) -> bool:
         return False
 
 
-def _formula_schema(current_formula: str) -> vol.Schema:
+def _price_schema(current_entity: str, current_formula: str) -> vol.Schema:
     """
-    Return a schema for the price-sensor step.
-
-    The formula field uses vol.Required (not vol.Optional) so that an empty
-    submission is explicitly saved as "" rather than being omitted from
-    user_input and leaving the old value in place.
+    Schema for the price-sensor step.
+    Uses vol.Required for the formula field so that clearing it saves ""
+    rather than leaving the old value in place.
     """
     return vol.Schema({
-        vol.Required(CONF_PRICE_ENTITY): _SENSOR_SEL,
-        vol.Required(
-            CONF_RETURN_PRICE_FORMULA,
-            default=current_formula,
-        ): str,
+        vol.Required(CONF_PRICE_ENTITY, default=current_entity): _SENSOR_SEL,
+        vol.Required(CONF_RETURN_PRICE_FORMULA, default=current_formula): str,
     })
 
 
@@ -58,9 +54,33 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self):
         self._data: dict = {}
 
-    # ── Step 1: Price sensor ──────────────────────────────────────────────────
+    # ── Step 0: Name ─────────────────────────────────────────────────────────
 
     async def async_step_user(self, user_input=None):
+        errors = {}
+        if user_input is not None:
+            name = user_input[CONF_BATTERY_NAME].strip()
+            if not name:
+                errors[CONF_BATTERY_NAME] = "name_empty"
+            else:
+                # Use the name as the unique ID so multiple batteries are allowed
+                await self.async_set_unique_id(f"battery_advisor_{name.lower()}")
+                self._abort_if_unique_id_configured()
+                self._data.update(user_input)
+                return await self.async_step_price()
+        d = self._data
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema({
+                vol.Required(CONF_BATTERY_NAME,
+                    default=d.get(CONF_BATTERY_NAME, "")): str,
+            }),
+            errors=errors,
+        )
+
+    # ── Step 1: Price sensor ──────────────────────────────────────────────────
+
+    async def async_step_price(self, user_input=None):
         errors = {}
         if user_input is not None:
             formula = user_input.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)
@@ -71,8 +91,11 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_battery()
         d = self._data
         return self.async_show_form(
-            step_id="user",
-            data_schema=_formula_schema(d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)),
+            step_id="price",
+            data_schema=_price_schema(
+                d.get(CONF_PRICE_ENTITY, ""),
+                d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA),
+            ),
             errors=errors,
         )
 
@@ -125,11 +148,9 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_soc(self, user_input=None):
         if user_input is not None:
             self._data.update({k: v for k, v in user_input.items() if v})
-            entity_id = self._data[CONF_PRICE_ENTITY]
-            await self.async_set_unique_id(f"battery_advisor_{entity_id}")
-            self._abort_if_unique_id_configured()
+            name = self._data[CONF_BATTERY_NAME]
             return self.async_create_entry(
-                title=f"Battery Advisor ({entity_id})",
+                title=name,
                 data=self._data,
             )
         d = self._data
@@ -160,9 +181,9 @@ class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
         return {**self._config_entry.data, **self._config_entry.options}
 
     async def async_step_init(self, user_input=None):
-        return await self.async_step_user(user_input)
+        return await self.async_step_price(user_input)
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_price(self, user_input=None):
         errors = {}
         if user_input is not None:
             formula = user_input.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)
@@ -173,8 +194,11 @@ class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_battery()
         d = {**self._current(), **self._data}
         return self.async_show_form(
-            step_id="user",
-            data_schema=_formula_schema(d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)),
+            step_id="price",
+            data_schema=_price_schema(
+                d.get(CONF_PRICE_ENTITY, ""),
+                d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA),
+            ),
             errors=errors,
         )
 

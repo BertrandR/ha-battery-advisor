@@ -503,6 +503,10 @@ def _apply_min_profit_filter(
     discharge_blocks = get_blocks(actions, DISCHARGE_ACTIONS)
     used_discharge: set[int] = set()
 
+    # ── Pass 1: pair each charge block with its nearest following discharge ──────
+    # Using nearest-first (not best-spread) so that a high-value future discharge
+    # block is not greedily consumed by an earlier charge block, leaving a later
+    # charge block with no candidate and getting incorrectly suppressed.
     for cb_s, cb_e in charge_blocks:
         candidates = [
             (i, db_s, db_e)
@@ -513,8 +517,8 @@ def _apply_min_profit_filter(
             suppress.update(range(cb_s, cb_e))
             continue
 
-        best = max(candidates, key=lambda c: discharge_rev(c[1], c[2]) - charge_cost(cb_s, cb_e))
-        didx, db_s, db_e = best
+        nearest = min(candidates, key=lambda c: c[1])
+        didx, db_s, db_e = nearest
         spread = discharge_rev(db_s, db_e) - charge_cost(cb_s, cb_e)
 
         _LOGGER.debug("charge→discharge spread=%.4f vs min=%.4f", spread, min_profit_eur_per_kwh)
@@ -553,8 +557,8 @@ def _apply_min_profit_filter(
         if not candidates:
             continue
 
-        best = max(candidates, key=lambda c: discharge_rev(db_s, db_e) - charge_cost(c[1], c[2]))
-        cidx, cb_s, cb_e = best
+        nearest = min(candidates, key=lambda c: c[1])
+        cidx, cb_s, cb_e = nearest
         spread = discharge_rev(db_s, db_e) - charge_cost(cb_s, cb_e)
 
         _LOGGER.debug("discharge→charge spread=%.4f vs min=%.4f", spread, min_profit_eur_per_kwh)
@@ -631,6 +635,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
     def __init__(
         self,
         hass: HomeAssistant,
+        battery_name: str,
         price_entity_id: str,
         charge_energy: float,
         discharge_energy: float,
@@ -641,17 +646,18 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         return_price_formula: str = DEFAULT_RETURN_PRICE_FORMULA,
         zen_soc_entity: str | None = None,
     ) -> None:
-        super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None)
-        self.price_entity_id      = price_entity_id
-        self.battery              = BatteryModel(charge_energy, discharge_energy, charge_power, discharge_power)
-        self.min_profit           = min_profit
-        self._discharge_usage_power = discharge_usage_power
-        self._return_price_formula  = return_price_formula
-        self.zen_soc_entity         = zen_soc_entity or ""
-        self._unsub_state: list     = []
+        super().__init__(hass, _LOGGER, name=f"{DOMAIN}_{battery_name}", update_interval=None)
+        self.battery_name             = battery_name
+        self.price_entity_id          = price_entity_id
+        self.battery                  = BatteryModel(charge_energy, discharge_energy, charge_power, discharge_power)
+        self.min_profit               = min_profit
+        self._discharge_usage_power   = discharge_usage_power
+        self._return_price_formula    = return_price_formula
+        self.zen_soc_entity           = zen_soc_entity or ""
+        self._unsub_state: list       = []
         self._last_planned_soc: float | None = None
 
-        _LOGGER.debug("Coordinator initialised: %s", self.battery)
+        _LOGGER.debug("[%s] Coordinator initialised: %s", self.battery_name, self.battery)
 
     # ── Listeners ─────────────────────────────────────────────────────────────
 
@@ -784,8 +790,8 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             live_soc = self._last_planned_soc
 
         _LOGGER.debug(
-            "Coordinator update — zen_soc_entity=%r live_soc=%s last_planned_soc=%s slots=%d min_profit=%.3f",
-            self.zen_soc_entity, live_soc, self._last_planned_soc, len(prices), self.min_profit,
+            "[%s] Coordinator update — zen_soc_entity=%r live_soc=%s last_planned_soc=%s slots=%d min_profit=%.3f",
+            self.battery_name, self.zen_soc_entity, live_soc, self._last_planned_soc, len(prices), self.min_profit,
         )
 
         # 4. Optimise
@@ -806,7 +812,8 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         self._last_planned_soc = live_soc
         savings = _calc_savings(schedule)
         _LOGGER.debug(
-            "Schedule computed — active slots=%d  savings=€%.2f  initial_soc=%s%%",
+            "[%s] Schedule computed — active slots=%d  savings=€%.2f  initial_soc=%s%%",
+            self.battery_name,
             sum(1 for h in schedule if h["action"] != ACTION_IDLE),
             savings["net"],
             live_soc,

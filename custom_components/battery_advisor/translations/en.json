@@ -2,6 +2,15 @@
   "config": {
     "step": {
       "user": {
+        "title": "Battery Name",
+        "data": {
+          "battery_name": "Name"
+        },
+        "data_description": {
+          "battery_name": "A unique name for this battery (e.g. 'Zendure AIO' or 'Simulated 10kWh'). Used to identify its sensors."
+        }
+      },
+      "price": {
         "title": "Price Sensor",
         "data": {
           "price_entity_id": "Price sensor entity",
@@ -35,12 +44,13 @@
       }
     },
     "error": {
-      "formula_invalid": "Return price formula is invalid. Use 'current_price' as the variable."
+      "formula_invalid": "Return price formula is invalid. Use 'current_price' as the variable.",
+      "name_empty": "Name cannot be empty."
     }
   },
   "options": {
     "step": {
-      "user": {
+      "price": {
         "title": "Price Sensor",
         "data": {
           "price_entity_id": "Price sensor entity",
