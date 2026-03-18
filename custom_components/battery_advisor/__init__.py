@@ -1,4 +1,4 @@
-"""Battery Dispatch Advisor — Home Assistant Integration."""
+"""Battery Advisor — Home Assistant Integration."""
 from __future__ import annotations
 
 import logging

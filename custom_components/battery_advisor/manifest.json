@@ -1,11 +1,11 @@
 {
   "domain": "battery_advisor",
-  "name": "Battery Dispatch Advisor",
-  "version": "2.1.1",
-  "documentation": "https://github.com/yourusername/ha-battery-advisor",
-  "issue_tracker": "https://github.com/yourusername/ha-battery-advisor/issues",
-  "codeowners": [],
+  "name": "Battery Advisor",
+  "version": "1.0.0",
+  "documentation": "https://github.com/BertrandR/ha-battery-advisor",
+  "issue_tracker": "https://github.com/BertrandR/ha-battery-advisor/issues",
+  "codeowners": ["@BertrandR"],
   "requirements": [],
-  "iot_class": "cloud_polling",
+  "iot_class": "calculated",
   "config_flow": true
 }

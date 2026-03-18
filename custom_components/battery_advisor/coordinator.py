@@ -1,4 +1,4 @@
-"""Data coordinator for Battery Dispatch Advisor."""
+"""Data coordinator for Battery Advisor."""
 from __future__ import annotations
 
 import logging
@@ -13,7 +13,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import (
     DOMAIN,
     ACTION_CHARGE_GRID, ACTION_CHARGE_SOLAR,
-    ACTION_DISCHARGE_NET, ACTION_DISCHARGE_USAGE,
+    ACTION_DISCHARGE_GRID, ACTION_DISCHARGE_USAGE,
     ACTION_IDLE,
     CHARGE_ACTIONS, DISCHARGE_ACTIONS,
     DEFAULT_DISCHARGE_USAGE_POWER,
@@ -299,7 +299,7 @@ def _optimize_schedule(
     Four actions per slot:
       charge_grid     — pay buy_price  × charge_kwh_per_hour   (always)
       charge_solar    — pay return_price × charge_kwh_per_hour  (daylight only)
-      discharge_net   — earn return_price × discharge_kwh_per_hour (always)
+      discharge_grid  — earn return_price × discharge_kwh_per_hour (always)
       discharge_usage — earn buy_price × usage_kwh_per_hour    (always, reduced power)
 
     All per-hour grid-side and battery-side quantities are derived from
@@ -367,7 +367,7 @@ def _optimize_schedule(
                 grid_out = steps_dn * discharge_grid_kwh_per_step
                 v = ret * grid_out + val_next[s - steps_dn]
                 if v > best_val:
-                    best_val, best_act = v, ACTION_DISCHARGE_NET
+                    best_val, best_act = v, ACTION_DISCHARGE_GRID
 
             steps_du = min(usage_steps, s)
             if steps_du > 0:
@@ -404,7 +404,7 @@ def _optimize_schedule(
             grid_in  = su * charge_grid_kwh_per_step
             soc_kwh  = min(battery.usable_kwh, soc_kwh + su * step)
             raw_kwh.append(round(grid_in, 3))
-        elif act == ACTION_DISCHARGE_NET:
+        elif act == ACTION_DISCHARGE_GRID:
             sd       = min(discharge_steps, s)
             grid_out = sd * discharge_grid_kwh_per_step
             soc_kwh  = max(0.0, soc_kwh - sd * step)
@@ -459,7 +459,7 @@ def _apply_min_profit_filter(
 
     charge_grid  cost  = buy_price   / eff  (per kWh stored)
     charge_solar cost  = return_price / eff  (opportunity cost per kWh stored)
-    discharge_net rev  = return_price × eff  (per kWh released)
+    discharge_grid rev = return_price × eff  (per kWh released)
     discharge_usage rev = buy_price  × eff  (per kWh released)
 
     Pairs each charge block with the best-spread following discharge block
@@ -586,7 +586,7 @@ def _calc_savings(schedule: list[dict]) -> dict:
         kwh = h["kwh"]
         if   act == ACTION_CHARGE_GRID:     cost    += buy * kwh
         elif act == ACTION_CHARGE_SOLAR:    cost    += ret * kwh
-        elif act == ACTION_DISCHARGE_NET:   revenue += ret * kwh
+        elif act == ACTION_DISCHARGE_GRID:   revenue += ret * kwh
         elif act == ACTION_DISCHARGE_USAGE: revenue += buy * kwh
     return {"cost": round(cost, 3), "revenue": round(revenue, 3), "net": round(revenue - cost, 3)}
 

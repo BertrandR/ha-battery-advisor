@@ -1,4 +1,4 @@
-# Battery Dispatch Advisor — Home Assistant Integration
+# Battery Advisor — Home Assistant Integration
 
 Reads hourly electricity prices from an **existing HA sensor** and computes an
 optimal charge/discharge schedule for your home battery using dynamic programming.
@@ -25,12 +25,12 @@ Prices are auto-normalised to EUR/MWh regardless of source unit.
 ## Installation
 
 ### HACS
-Add this repository as a custom repository in HACS, then install **Battery Dispatch Advisor**.
+Add this repository as a custom repository in HACS, then install **Battery Advisor**.
 
 ### Manual
 1. Copy `custom_components/battery_advisor/` to `/config/custom_components/battery_advisor/`
 2. Restart Home Assistant
-3. Go to **Settings → Devices & Services → + Add Integration**, search for **Battery Dispatch Advisor**
+3. Go to **Settings → Devices & Services → + Add Integration**, search for **Battery Advisor**
 
 ---
 
@@ -50,7 +50,6 @@ Setup is a four-step flow:
 - **Charge power** (kW) — grid-side charge rate
 - **Discharge power** (kW) — grid-side discharge rate
 
-These two energy values replace the old capacity / min SoC / max SoC / RTE settings.
 Efficiency and usable capacity are derived automatically:
 `eff = √(discharge_energy / charge_energy)`, `usable_kwh = charge_energy × eff`
 
@@ -58,8 +57,8 @@ Efficiency and usable capacity are derived automatically:
 - **Minimum profit** (EUR/kWh) — suppress cycles below this effective spread after losses (default 0.02)
 - **Discharge-to-usage power** (kW) — assumed drain rate when covering home usage (default 0.3)
 
-### Step 4 — Zendure (optional)
-- **Zendure SoC sensor** — if configured, the live SoC is used as the starting point for the DP optimiser. Leave blank to assume 50%.
+### Step 4 — Battery SoC (optional)
+- **Battery SoC sensor** — if configured, the live SoC is used as the starting point for the optimiser. Leave blank to assume 50%.
 
 ---
 
@@ -72,7 +71,7 @@ Efficiency and usable capacity are derived automatically:
 | `sensor.battery_advisor_next_action` | see below | Next scheduled action change |
 | `sensor.battery_advisor_daily_savings` | EUR | Estimated net profit over forecast window |
 | `sensor.battery_advisor_schedule` | int (slot count) | Full schedule + battery info in attributes |
-| `sensor.battery_advisor_battery_soc` | % | Live SoC (only if Zendure entity configured) |
+| `sensor.battery_advisor_battery_soc` | % | Live SoC (only if SoC entity configured) |
 
 ### Action values
 
@@ -80,7 +79,7 @@ Efficiency and usable capacity are derived automatically:
 |---|---|
 | `charge_grid` | Charge from grid at buy tariff |
 | `charge_solar` | Charge from solar (daylight only) at return tariff opportunity cost |
-| `discharge_net` | Export to grid at return tariff, full discharge power |
+| `discharge_grid` | Export to grid at return tariff, full discharge power |
 | `discharge_usage` | Cover home usage at buy tariff, reduced power |
 | `idle` | No action |
 
@@ -88,6 +87,15 @@ Efficiency and usable capacity are derived automatically:
 return tariff opportunity cost is lower than the grid buy price.
 `discharge_usage` is selected when the buy tariff significantly exceeds the return
 tariff, making covering home usage more profitable than exporting.
+
+### Schedule sensor attributes
+
+The `sensor.battery_advisor_schedule` entity exposes the following attributes in addition to the full schedule list:
+
+- `charge_grid_hours`, `charge_solar_hours`, `discharge_grid_hours`, `discharge_usage_hours` — lists of local-time hour strings (e.g. `"18:00"`) for each action type (deduplicated)
+- `charge_hours`, `discharge_hours` — combined charge / discharge hour lists
+- `planned_soc` — the SoC% value that was used as the starting point for the last optimisation run
+- `battery_usable_kwh`, `battery_eff`, `battery_charge_time`, `battery_discharge_time` — derived battery parameters
 
 ---
 
@@ -139,7 +147,7 @@ automation:
           - conditions:
               - condition: state
                 entity_id: sensor.battery_advisor_current_action
-                state: "discharge_net"
+                state: "discharge_grid"
             sequence:
               - service: select.select_option
                 target: { entity_id: select.battery_discharge_mode }
@@ -162,6 +170,7 @@ automation:
 
 ```yaml
 {% set schedule = state_attr('sensor.battery_advisor_schedule', 'schedule') %}
+{# Note: 'hour' is local time only — use 'datetime' for unambiguous cross-day lookups #}
 {% set h = now().strftime('%H:00') %}
 {{ (schedule | selectattr('hour', 'eq', h) | list | first).action }}
 ```

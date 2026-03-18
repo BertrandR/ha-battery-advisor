@@ -1,4 +1,4 @@
-"""Config flow for Battery Dispatch Advisor — multi-step."""
+"""Config flow for Battery Advisor — multi-step."""
 from __future__ import annotations
 
 import voluptuous as vol
@@ -35,7 +35,24 @@ def _validate_formula(formula: str) -> bool:
         return False
 
 
-class BatteryOptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+def _formula_schema(current_formula: str) -> vol.Schema:
+    """
+    Return a schema for the price-sensor step.
+
+    The formula field uses vol.Required (not vol.Optional) so that an empty
+    submission is explicitly saved as "" rather than being omitted from
+    user_input and leaving the old value in place.
+    """
+    return vol.Schema({
+        vol.Required(CONF_PRICE_ENTITY): _SENSOR_SEL,
+        vol.Required(
+            CONF_RETURN_PRICE_FORMULA,
+            default=current_formula,
+        ): str,
+    })
+
+
+class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
 
     def __init__(self):
@@ -55,12 +72,7 @@ class BatteryOptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         d = self._data
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({
-                vol.Required(CONF_PRICE_ENTITY,
-                    default=d.get(CONF_PRICE_ENTITY, "")): _SENSOR_SEL,
-                vol.Optional(CONF_RETURN_PRICE_FORMULA,
-                    default=d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)): str,
-            }),
+            data_schema=_formula_schema(d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)),
             errors=errors,
         )
 
@@ -93,7 +105,7 @@ class BatteryOptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_zendure()
+            return await self.async_step_soc()
         d = self._data
         return self.async_show_form(
             step_id="schedule",
@@ -108,9 +120,9 @@ class BatteryOptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ── Step 4: Zendure (optional, skippable) ────────────────────────────────
+    # ── Step 4: Battery SoC (optional) ───────────────────────────────────────
 
-    async def async_step_zendure(self, user_input=None):
+    async def async_step_soc(self, user_input=None):
         if user_input is not None:
             self._data.update({k: v for k, v in user_input.items() if v})
             entity_id = self._data[CONF_PRICE_ENTITY]
@@ -122,7 +134,7 @@ class BatteryOptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
         d = self._data
         return self.async_show_form(
-            step_id="zendure",
+            step_id="soc",
             data_schema=vol.Schema({
                 vol.Optional(CONF_ZEN_SOC,
                     default=d.get(CONF_ZEN_SOC, "")): _OPT_SENSOR_SEL,
@@ -133,12 +145,12 @@ class BatteryOptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return BatteryOptimizerOptionsFlow(config_entry)
+        return BatteryAdvisorOptionsFlow(config_entry)
 
 
 # ── Options flow — mirrors setup steps ───────────────────────────────────────
 
-class BatteryOptimizerOptionsFlow(config_entries.OptionsFlow):
+class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, config_entry):
         self._config_entry = config_entry
@@ -162,12 +174,7 @@ class BatteryOptimizerOptionsFlow(config_entries.OptionsFlow):
         d = {**self._current(), **self._data}
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({
-                vol.Required(CONF_PRICE_ENTITY,
-                    default=d.get(CONF_PRICE_ENTITY, "")): _SENSOR_SEL,
-                vol.Optional(CONF_RETURN_PRICE_FORMULA,
-                    default=d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)): str,
-            }),
+            data_schema=_formula_schema(d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)),
             errors=errors,
         )
 
@@ -193,7 +200,7 @@ class BatteryOptimizerOptionsFlow(config_entries.OptionsFlow):
     async def async_step_schedule(self, user_input=None):
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_zendure()
+            return await self.async_step_soc()
         d = {**self._current(), **self._data}
         return self.async_show_form(
             step_id="schedule",
@@ -207,13 +214,13 @@ class BatteryOptimizerOptionsFlow(config_entries.OptionsFlow):
             }),
         )
 
-    async def async_step_zendure(self, user_input=None):
+    async def async_step_soc(self, user_input=None):
         if user_input is not None:
             self._data.update({k: v for k, v in user_input.items() if v})
             return self.async_create_entry(title="", data=self._data)
         d = {**self._current(), **self._data}
         return self.async_show_form(
-            step_id="zendure",
+            step_id="soc",
             data_schema=vol.Schema({
                 vol.Optional(CONF_ZEN_SOC,
                     default=d.get(CONF_ZEN_SOC, "")): _OPT_SENSOR_SEL,

@@ -1,4 +1,4 @@
-"""Constants for Battery Dispatch Advisor."""
+"""Constants for Battery Advisor."""
 
 DOMAIN = "battery_advisor"
 
@@ -18,7 +18,7 @@ CONF_DISCHARGE_USAGE_POWER  = "discharge_usage_power"   # kW assumed drain in us
 # ── Schedule ──────────────────────────────────────────────────────────────────
 CONF_MIN_PROFIT     = "min_profit"
 
-# ── Zendure (optional) ────────────────────────────────────────────────────────
+# ── Battery SoC (optional) ────────────────────────────────────────────────────
 CONF_ZEN_SOC        = "zendure_soc_entity"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -30,12 +30,12 @@ DEFAULT_DISCHARGE_USAGE_POWER = 0.3  # kW
 DEFAULT_MIN_PROFIT          = 0.02   # EUR/kWh
 DEFAULT_RETURN_PRICE_FORMULA = ""  # empty = auto-detect (use native excl-tax if available)
 
-# ── Dispatch actions ──────────────────────────────────────────────────────────
+# ── Actions ───────────────────────────────────────────────────────────────────
 ACTION_CHARGE_GRID      = "charge_grid"
 ACTION_CHARGE_SOLAR     = "charge_solar"
-ACTION_DISCHARGE_NET    = "discharge_net"
+ACTION_DISCHARGE_GRID   = "discharge_grid"
 ACTION_DISCHARGE_USAGE  = "discharge_usage"
 ACTION_IDLE             = "idle"
 
 CHARGE_ACTIONS    = {ACTION_CHARGE_GRID, ACTION_CHARGE_SOLAR}
-DISCHARGE_ACTIONS = {ACTION_DISCHARGE_NET, ACTION_DISCHARGE_USAGE}
+DISCHARGE_ACTIONS = {ACTION_DISCHARGE_GRID, ACTION_DISCHARGE_USAGE}

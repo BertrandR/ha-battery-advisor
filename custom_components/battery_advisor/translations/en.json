@@ -27,10 +27,10 @@
           "discharge_usage_power": "Discharge-to-usage assumed power (kW)"
         }
       },
-      "zendure": {
-        "title": "Zendure (optional)",
+      "soc": {
+        "title": "Battery SoC (optional)",
         "data": {
-          "zendure_soc_entity": "Zendure SoC sensor entity (leave blank to skip)"
+          "zendure_soc_entity": "Battery SoC sensor entity (leave blank to skip)"
         }
       }
     },
@@ -66,15 +66,15 @@
           "discharge_usage_power": "Discharge-to-usage assumed power (kW)"
         }
       },
-      "zendure": {
-        "title": "Zendure (optional)",
+      "soc": {
+        "title": "Battery SoC (optional)",
         "data": {
-          "zendure_soc_entity": "Zendure SoC sensor entity (leave blank to skip)"
+          "zendure_soc_entity": "Battery SoC sensor entity (leave blank to skip)"
         }
       }
     },
     "error": {
-      "formula_invalid": "Return price formula is invalid."
+      "formula_invalid": "Return price formula is invalid. Use 'current_price' as the variable."
     }
   }
 }

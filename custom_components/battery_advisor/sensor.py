@@ -1,4 +1,4 @@
-"""Sensor platform for Battery Dispatch Advisor."""
+"""Sensor platform for Battery Advisor."""
 from __future__ import annotations
 
 from typing import Any
@@ -13,7 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
     ACTION_CHARGE_GRID, ACTION_CHARGE_SOLAR,
-    ACTION_DISCHARGE_NET, ACTION_DISCHARGE_USAGE,
+    ACTION_DISCHARGE_GRID, ACTION_DISCHARGE_USAGE,
     ACTION_IDLE,
     CHARGE_ACTIONS, DISCHARGE_ACTIONS,
 )
@@ -48,7 +48,7 @@ def _device(coordinator: BatteryOptimizerCoordinator, entry: ConfigEntry) -> Dev
     return DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)},
         name="Battery Advisor",
-        manufacturer="Battery Dispatch Advisor",
+        manufacturer="Battery Advisor",
         model=model,
         entry_type="service",
     )
@@ -57,7 +57,7 @@ def _device(coordinator: BatteryOptimizerCoordinator, entry: ConfigEntry) -> Dev
 _ACTION_ICONS = {
     ACTION_CHARGE_GRID:     "mdi:transmission-tower-import",
     ACTION_CHARGE_SOLAR:    "mdi:solar-power",
-    ACTION_DISCHARGE_NET:   "mdi:transmission-tower-export",
+    ACTION_DISCHARGE_GRID:   "mdi:transmission-tower-export",
     ACTION_DISCHARGE_USAGE: "mdi:home-battery",
     ACTION_IDLE:            "mdi:battery-outline",
 }
@@ -76,7 +76,7 @@ class _Base(CoordinatorEntity, SensorEntity):
 # ── 1. Current Action ────────────────────────────────────────────────────────
 
 class BatteryActionSensor(_Base):
-    """Primary automation trigger: charge_grid | charge_solar | discharge_net | discharge_usage | idle"""
+    """Primary automation trigger: charge_grid | charge_solar | discharge_grid | discharge_usage | idle"""
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "current_action", "Current Action")
@@ -205,15 +205,25 @@ class BatteryScheduleSensor(_Base):
         d        = self.coordinator.data
         schedule = d.get("schedule", [])
         b        = self.coordinator.battery
+
+        def _unique_hours(actions):
+            seen = set()
+            result = []
+            for h in schedule:
+                if h["action"] in actions and h["hour"] not in seen:
+                    seen.add(h["hour"])
+                    result.append(h["hour"])
+            return result
+
         return {
             "schedule":              schedule,
-            "charge_grid_hours":     [h["hour"] for h in schedule if h["action"] == ACTION_CHARGE_GRID],
-            "charge_solar_hours":    [h["hour"] for h in schedule if h["action"] == ACTION_CHARGE_SOLAR],
-            "discharge_net_hours":   [h["hour"] for h in schedule if h["action"] == ACTION_DISCHARGE_NET],
-            "discharge_usage_hours": [h["hour"] for h in schedule if h["action"] == ACTION_DISCHARGE_USAGE],
+            "charge_grid_hours":     _unique_hours({ACTION_CHARGE_GRID}),
+            "charge_solar_hours":    _unique_hours({ACTION_CHARGE_SOLAR}),
+            "discharge_grid_hours":   _unique_hours({ACTION_DISCHARGE_GRID}),
+            "discharge_usage_hours": _unique_hours({ACTION_DISCHARGE_USAGE}),
             # Legacy combined lists
-            "charge_hours":          [h["hour"] for h in schedule if h["action"] in CHARGE_ACTIONS],
-            "discharge_hours":       [h["hour"] for h in schedule if h["action"] in DISCHARGE_ACTIONS],
+            "charge_hours":          _unique_hours(CHARGE_ACTIONS),
+            "discharge_hours":       _unique_hours(DISCHARGE_ACTIONS),
             # Battery derived info
             "battery_charge_time":    d.get("battery_charge_time"),
             "battery_discharge_time": d.get("battery_discharge_time"),
