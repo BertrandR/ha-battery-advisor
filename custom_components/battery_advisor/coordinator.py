@@ -190,6 +190,7 @@ def _to_eur_mwh(value: float, attrs: dict) -> float:
 # ---------------------------------------------------------------------------
 
 def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
+    """Return True if slot_ts falls between sunrise and sunset on its calendar day."""
     sun = hass.states.get("sun.sun")
     if sun is not None:
         try:
@@ -197,20 +198,34 @@ def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
             setting_str = sun.attributes.get("next_setting")
             if rising_str and setting_str:
                 slot_dt = datetime.fromtimestamp(slot_ts, tz=timezone.utc)
-                rising  = datetime.fromisoformat(rising_str)
-                setting = datetime.fromisoformat(setting_str)
-                if rising.tzinfo is None:
-                    rising  = rising.replace(tzinfo=timezone.utc)
-                if setting.tzinfo is None:
-                    setting = setting.replace(tzinfo=timezone.utc)
-                for day_offset in range(-2, 3):
-                    r = rising  + timedelta(days=day_offset)
-                    s = setting + timedelta(days=day_offset)
-                    if r < s and r.timestamp() <= slot_ts < s.timestamp():
-                        return True
-                return False
+
+                next_rising  = datetime.fromisoformat(rising_str)
+                next_setting = datetime.fromisoformat(setting_str)
+                if next_rising.tzinfo is None:
+                    next_rising  = next_rising.replace(tzinfo=timezone.utc)
+                if next_setting.tzinfo is None:
+                    next_setting = next_setting.replace(tzinfo=timezone.utc)
+
+                # next_rising and next_setting are the *next* upcoming events from
+                # now, so they may be on different days. Derive the time-of-day only
+                # and check whether slot_dt's local time falls between them.
+                local_slot   = slot_dt.astimezone()
+                local_rising = next_rising.astimezone()
+                local_setting = next_setting.astimezone()
+
+                # Build sunrise and sunset anchored to the slot's local calendar date
+                slot_date = local_slot.date()
+                sunrise = local_rising.replace(
+                    year=slot_date.year, month=slot_date.month, day=slot_date.day
+                )
+                sunset = local_setting.replace(
+                    year=slot_date.year, month=slot_date.month, day=slot_date.day
+                )
+                return sunrise <= local_slot < sunset
         except Exception:
             pass
+
+    # Fallback when sun.sun is unavailable
     local_hour = datetime.fromtimestamp(slot_ts).hour
     return 7 <= local_hour < 20
 
