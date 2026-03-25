@@ -6,8 +6,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from homeassistant.core import HomeAssistant, callback, Event
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_change
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -627,6 +626,51 @@ def _read_soc(hass: HomeAssistant, entity_id: str) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Estimated SoC annotation
+# ---------------------------------------------------------------------------
+
+def _annotate_estimated_soc(
+    schedule: list[dict],
+    battery: BatteryModel,
+    initial_soc_pct: float | None,
+) -> list[dict]:
+    """
+    Add estimated_soc (%) to each slot in the schedule.
+
+    estimated_soc represents the projected SoC at the START of each slot,
+    based on planned_soc as the starting point and the scheduled kwh values.
+
+    Charge slots increase SoC by kwh × eff / usable_kwh × 100.
+    Discharge slots decrease SoC by kwh / eff / usable_kwh × 100.
+    Idle slots leave SoC unchanged.
+    """
+    if not schedule:
+        return schedule
+
+    soc = initial_soc_pct if initial_soc_pct is not None else 50.0
+    eff = battery.eff
+    usable = battery.usable_kwh
+
+    result = []
+    for slot in schedule:
+        act = slot["action"]
+        kwh = slot["kwh"]
+
+        # Record SoC at start of this slot
+        estimated = round(max(0.0, min(100.0, soc)), 1)
+
+        if act in CHARGE_ACTIONS:
+            soc += kwh * eff / usable * 100.0
+        elif act in DISCHARGE_ACTIONS:
+            soc -= kwh / eff / usable * 100.0
+
+        soc = max(0.0, min(100.0, soc))
+        result.append({**slot, "estimated_soc": estimated})
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Coordinator
 # ---------------------------------------------------------------------------
 
@@ -638,14 +682,8 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
     (charge_energy, discharge_energy) rather than capacity + SoC limits + RTE.
     The only optional HA entity read is zen_soc_entity for live SoC%.
 
-    Updates driven by:
-      1. Price sensor forecast attribute change
-      2. SoC entity change (significant move, ≥ SOC_REPLAN_THRESHOLD %)
-      3. Hourly tick at :00
+    Updates on a fixed 15-minute interval.
     """
-
-    # Re-plan when SoC moves by at least this many percentage points
-    SOC_REPLAN_THRESHOLD = 5.0
 
     def __init__(
         self,
@@ -661,109 +699,27 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         return_price_formula: str = DEFAULT_RETURN_PRICE_FORMULA,
         zen_soc_entity: str | None = None,
     ) -> None:
-        super().__init__(hass, _LOGGER, name=f"{DOMAIN}_{battery_name}", update_interval=None)
-        self.battery_name             = battery_name
-        self.price_entity_id          = price_entity_id
-        self.battery                  = BatteryModel(charge_energy, discharge_energy, charge_power, discharge_power)
-        self.min_profit               = min_profit
-        self._discharge_usage_power   = discharge_usage_power
-        self._return_price_formula    = return_price_formula
-        self.zen_soc_entity           = zen_soc_entity or ""
-        self._unsub_state: list       = []
-        self._last_planned_soc: float | None = None
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_{battery_name}",
+            update_interval=timedelta(minutes=15),
+        )
+        self.battery_name           = battery_name
+        self.price_entity_id        = price_entity_id
+        self.battery                = BatteryModel(charge_energy, discharge_energy, charge_power, discharge_power)
+        self.min_profit             = min_profit
+        self._discharge_usage_power = discharge_usage_power
+        self._return_price_formula  = return_price_formula
+        self.zen_soc_entity         = zen_soc_entity or ""
 
         _LOGGER.debug("[%s] Coordinator initialised: %s", self.battery_name, self.battery)
 
-    # ── Listeners ─────────────────────────────────────────────────────────────
-
     async def async_setup(self) -> None:
-        @callback
-        def _on_price_change(event: Event) -> None:
-            ns = event.data.get("new_state")
-            os = event.data.get("old_state")
-            if ns is None:
-                return
-            # Only re-plan when the forecast attribute actually changes,
-            # not on every current-price tick (state value change).
-            ns_forecast = (ns.attributes or {}).get("forecast")
-            os_forecast = (os.attributes or {}).get("forecast") if os else None
-            if ns_forecast is not None and ns_forecast == os_forecast:
-                _LOGGER.debug("Price sensor state changed but forecast unchanged — skipping re-plan")
-                return
-            self.hass.async_create_task(self.async_refresh())
+        """No custom listeners — polling handled by update_interval."""
 
-        @callback
-        def _on_soc_change(event: Event) -> None:
-            ns = event.data.get("new_state")
-            os = event.data.get("old_state")
-            if ns is None:
-                return
-
-            new_unavailable = ns.state in ("unavailable", "unknown", None)
-            old_unavailable = (os is None) or (os.state in ("unavailable", "unknown", None))
-
-            # Re-plan when entity recovers from unavailable — the last plan may
-            # have been computed with a stale/zero SoC.
-            if old_unavailable and not new_unavailable:
-                _LOGGER.debug("SoC entity recovered from unavailable — triggering re-plan")
-                self.hass.async_create_task(self.async_refresh())
-                return
-
-            if new_unavailable:
-                return
-
-            try:
-                new_soc = float(ns.state)
-            except (ValueError, TypeError):
-                return
-
-            last = self._last_planned_soc
-
-            # Always re-plan on first reading
-            if last is None:
-                _LOGGER.debug("First SoC reading (%.1f%%) — triggering re-plan", new_soc)
-                self.hass.async_create_task(self.async_refresh())
-                return
-
-            # Re-plan if the last plan used a bad SoC (0 or None-fallback 50%)
-            # and we now have a real reading that differs meaningfully
-            if last <= 1.0 and new_soc >= 5.0:
-                _LOGGER.debug(
-                    "Last plan used near-zero SoC (%.1f%%), now reading %.1f%% — triggering re-plan",
-                    last, new_soc,
-                )
-                self.hass.async_create_task(self.async_refresh())
-                return
-
-            # Re-plan if SoC has moved significantly from the last planned value
-            if abs(new_soc - last) >= self.SOC_REPLAN_THRESHOLD:
-                _LOGGER.debug(
-                    "SoC moved from %.1f%% to %.1f%% (≥%.0f%%) — triggering re-plan",
-                    last, new_soc, self.SOC_REPLAN_THRESHOLD,
-                )
-                self.hass.async_create_task(self.async_refresh())
-
-        @callback
-        def _on_new_hour(_now) -> None:
-            self.hass.async_create_task(self.async_refresh())
-
-        self._unsub_state.append(
-            async_track_state_change_event(self.hass, [self.price_entity_id], _on_price_change)
-        )
-        self._unsub_state.append(
-            async_track_time_change(self.hass, _on_new_hour, minute=0, second=0)
-        )
-        # Track SoC entity if configured
-        if self.zen_soc_entity:
-            self._unsub_state.append(
-                async_track_state_change_event(self.hass, [self.zen_soc_entity], _on_soc_change)
-            )
-
-    @callback
     def async_teardown(self) -> None:
-        for unsub in self._unsub_state:
-            unsub()
-        self._unsub_state.clear()
+        """No custom listeners to clean up."""
 
     # ── Main update ───────────────────────────────────────────────────────────
 
@@ -786,27 +742,9 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         # 3. Live SoC
         live_soc = _read_soc(self.hass, self.zen_soc_entity)
 
-        # Guard: if SoC reads suspiciously low (≤1%) but a previous plan used a
-        # significantly higher value, treat the reading as transient/stale.
-        # Zendure (and similar) occasionally report 0 briefly during comms gaps
-        # or HA startup, which causes the DP to plan all-idle for the current day.
-        if (
-            live_soc is not None
-            and live_soc <= 1.0
-            and self._last_planned_soc is not None
-            and self._last_planned_soc >= 10.0
-        ):
-            _LOGGER.warning(
-                "SoC reads %.1f%% but last planned SoC was %.1f%% — "
-                "treating as transient read, using last known SoC",
-                live_soc,
-                self._last_planned_soc,
-            )
-            live_soc = self._last_planned_soc
-
         _LOGGER.debug(
-            "[%s] Coordinator update — zen_soc_entity=%r live_soc=%s last_planned_soc=%s slots=%d min_profit=%.3f",
-            self.battery_name, self.zen_soc_entity, live_soc, self._last_planned_soc, len(prices), self.min_profit,
+            "[%s] Coordinator update — zen_soc_entity=%r live_soc=%s slots=%d min_profit=%.3f",
+            self.battery_name, self.zen_soc_entity, live_soc, len(prices), self.min_profit,
         )
 
         # 4. Optimise
@@ -823,8 +761,6 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Optimisation failed: %s", err, exc_info=True)
             raise UpdateFailed(f"Optimisation failed: {err}") from err
 
-        # Record SoC used for this plan (for stale-read guard and re-plan trigger)
-        self._last_planned_soc = live_soc
         savings = _calc_savings(schedule)
         _LOGGER.debug(
             "[%s] Schedule computed — active slots=%d  savings=€%.2f  initial_soc=%s%%",
@@ -834,7 +770,10 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             live_soc,
         )
 
-        # 5. Derive current-hour values
+        # 5. Annotate schedule with estimated_soc per slot
+        schedule = _annotate_estimated_soc(schedule, self.battery, live_soc)
+
+        # 6. Derive current-hour values
         current = next(
             (h for h in schedule if h["ts"] <= now_ts < h["ts"] + 3600),
             schedule[0],
@@ -863,7 +802,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             "next_discharge_at":    next_discharge["hour"] if next_discharge else None,
             "price_entity":         self.price_entity_id,
             "zendure_soc":          live_soc,
-            "planned_soc":          live_soc,   # SoC actually used for this plan (post-guard)
+            "planned_soc":          live_soc,
             "last_updated":         now.isoformat(),
             # Expose derived battery info for sensors
             "battery_charge_time":    round(self.battery.charge_time, 2),

@@ -42,7 +42,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         zen_soc_entity        = cfg.get(CONF_ZEN_SOC) or None,
     )
 
-    await coordinator.async_setup()
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
@@ -52,9 +51,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    coordinator: BatteryOptimizerCoordinator = hass.data[DOMAIN].get(entry.entry_id)
-    if coordinator:
-        coordinator.async_teardown()
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id, None)
