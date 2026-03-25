@@ -200,7 +200,19 @@ class BatteryScheduleSensor(_Base):
 
     @property
     def native_value(self):
-        return len(self.coordinator.data.get("schedule", []))
+        """Return a short hash of the schedule content.
+
+        Using a content hash instead of slot count means last_changed fires
+        whenever the actual schedule changes — not just when the number of
+        slots changes. This prevents stale schedule content being shown with
+        an outdated last_changed timestamp when a re-plan produces a different
+        plan but happens to have the same slot count.
+        """
+        import hashlib
+        schedule = self.coordinator.data.get("schedule", [])
+        planned_soc = self.coordinator.data.get("planned_soc")
+        content = str([(h["ts"], h["action"], h["kwh"]) for h in schedule]) + str(planned_soc)
+        return hashlib.md5(content.encode()).hexdigest()[:8]
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -219,6 +231,7 @@ class BatteryScheduleSensor(_Base):
 
         return {
             "schedule":              schedule,
+            "slot_count":            len(schedule),
             "charge_grid_hours":     _unique_hours({ACTION_CHARGE_GRID}),
             "charge_solar_hours":    _unique_hours({ACTION_CHARGE_SOLAR}),
             "discharge_grid_hours":   _unique_hours({ACTION_DISCHARGE_GRID}),
