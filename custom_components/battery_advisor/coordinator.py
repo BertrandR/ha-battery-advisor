@@ -469,17 +469,15 @@ def _apply_min_profit_filter(
     eff: float,
 ) -> tuple[list[str], list[float]]:
     """
-    Suppress cycles whose effective spread after efficiency losses is below threshold.
+    Suppress or trim cycles whose effective spread after efficiency losses is below
+    the minimum profit threshold.
 
-    charge_grid  cost  = buy_price   / eff  (per kWh stored)
-    charge_solar cost  = return_price / eff  (opportunity cost per kWh stored)
-    discharge_grid rev = return_price × eff  (per kWh released)
-    discharge_usage rev = buy_price  × eff  (per kWh released)
+    For each charge→discharge pair, if the full blocks don't clear the threshold,
+    the filter tries all contiguous sub-blocks to find the combination that
+    maximises total EUR profit while still clearing the threshold. Hours trimmed
+    from the edges of unprofitable blocks are set to idle.
 
-    Pairs each charge block with the best-spread following discharge block
-    (not just the nearest) to avoid micro-cycles masking the real arbitrage window.
-
-    # TODO: separate min_profit thresholds per action type
+    If no sub-combination clears the threshold, the cycle is suppressed entirely.
     """
     T = len(actions)
 
@@ -496,31 +494,59 @@ def _apply_min_profit_filter(
                 i += 1
         return blocks
 
-    def charge_cost(start, end):
-        costs = []
-        for h in range(start, end):
-            tariff = return_eur_kwh[h] if actions[h] == ACTION_CHARGE_SOLAR else buy_eur_kwh[h]
-            costs.append(tariff / eff)
-        return sum(costs) / len(costs)
+    def slot_charge_cost(h):
+        tariff = return_eur_kwh[h] if actions[h] == ACTION_CHARGE_SOLAR else buy_eur_kwh[h]
+        return tariff / eff
 
-    def discharge_rev(start, end):
-        revs = []
-        for h in range(start, end):
-            tariff = buy_eur_kwh[h] if actions[h] == ACTION_DISCHARGE_USAGE else return_eur_kwh[h]
-            revs.append(tariff * eff)
-        return sum(revs) / len(revs)
+    def slot_discharge_rev(h):
+        tariff = buy_eur_kwh[h] if actions[h] == ACTION_DISCHARGE_USAGE else return_eur_kwh[h]
+        return tariff * eff
+
+    def block_spread(cb_s, cb_e, db_s, db_e):
+        cc = sum(slot_charge_cost(h) for h in range(cb_s, cb_e)) / (cb_e - cb_s)
+        dr = sum(slot_discharge_rev(h) for h in range(db_s, db_e)) / (db_e - db_s)
+        return dr - cc
+
+    def block_profit(cb_s, cb_e, db_s, db_e):
+        """Total EUR profit for a charge→discharge pair, capped by the smaller side."""
+        charge_kwh  = sum(buy_eur_kwh[h] for h in range(cb_s, cb_e))  # proxy for energy
+        discharge_kwh = sum(return_eur_kwh[h] for h in range(db_s, db_e))
+        # Use number of hours as energy proxy (equal power assumed)
+        n_c = cb_e - cb_s
+        n_d = db_s - db_e  # negative, so use abs
+        n_d = db_e - db_s
+        cap = min(n_c, n_d)  # discharge limited by charge and vice versa
+        cost_per_hr    = sum(slot_charge_cost(h) for h in range(cb_s, cb_e)) / n_c
+        rev_per_hr     = sum(slot_discharge_rev(h) for h in range(db_s, db_e)) / n_d
+        return (rev_per_hr - cost_per_hr) * cap
+
+    def best_trimmed(cb_s, cb_e, db_s, db_e):
+        """
+        Find the contiguous sub-blocks (within original bounds) that maximise
+        total profit while clearing min_profit_eur_per_kwh.
+        Returns (cs, ce, ds, de) or None if no profitable combination exists.
+        """
+        best_profit = -999.0
+        best = None
+        for cs in range(cb_s, cb_e):
+            for ce in range(cs + 1, cb_e + 1):
+                for ds in range(db_s, db_e):
+                    for de in range(ds + 1, db_e + 1):
+                        spread = block_spread(cs, ce, ds, de)
+                        if spread >= min_profit_eur_per_kwh:
+                            profit = block_profit(cs, ce, ds, de)
+                            if profit > best_profit:
+                                best_profit = profit
+                                best = (cs, ce, ds, de)
+        return best
 
     suppress: set[int] = set()
 
-    # ── Pass 1: charge → best discharge ──────────────────────────────────────
+    # ── Pass 1: charge → nearest following discharge ──────────────────────────
     charge_blocks    = get_blocks(actions, CHARGE_ACTIONS)
     discharge_blocks = get_blocks(actions, DISCHARGE_ACTIONS)
     used_discharge: set[int] = set()
 
-    # ── Pass 1: pair each charge block with its nearest following discharge ──────
-    # Using nearest-first (not best-spread) so that a high-value future discharge
-    # block is not greedily consumed by an earlier charge block, leaving a later
-    # charge block with no candidate and getting incorrectly suppressed.
     for cb_s, cb_e in charge_blocks:
         candidates = [
             (i, db_s, db_e)
@@ -533,17 +559,31 @@ def _apply_min_profit_filter(
 
         nearest = min(candidates, key=lambda c: c[1])
         didx, db_s, db_e = nearest
-        spread = discharge_rev(db_s, db_e) - charge_cost(cb_s, cb_e)
+        spread = block_spread(cb_s, cb_e, db_s, db_e)
 
         _LOGGER.debug("charge→discharge spread=%.4f vs min=%.4f", spread, min_profit_eur_per_kwh)
 
-        if spread < min_profit_eur_per_kwh:
-            suppress.update(range(cb_s, cb_e))
-            suppress.update(range(db_s, db_e))
-        else:
+        if spread >= min_profit_eur_per_kwh:
             used_discharge.add(didx)
+        else:
+            # Full blocks don't clear threshold — try trimming to best sub-combination
+            trimmed = best_trimmed(cb_s, cb_e, db_s, db_e)
+            if trimmed:
+                cs, ce, ds, de = trimmed
+                _LOGGER.debug(
+                    "Trimmed charge %d-%d→%d-%d and discharge %d-%d→%d-%d (spread %.4f)",
+                    cb_s, cb_e, cs, ce, db_s, db_e, ds, de,
+                    block_spread(cs, ce, ds, de),
+                )
+                # Suppress trimmed-off hours within the original blocks
+                suppress.update(set(range(cb_s, cb_e)) - set(range(cs, ce)))
+                suppress.update(set(range(db_s, db_e)) - set(range(ds, de)))
+                used_discharge.add(didx)
+            else:
+                suppress.update(range(cb_s, cb_e))
+                suppress.update(range(db_s, db_e))
 
-    # ── Pass 2: discharge → charge micro-cycles ───────────────────────────────
+    # ── Pass 2: discharge → nearest following charge ──────────────────────────
     working = list(actions)
     for h in suppress:
         working[h] = ACTION_IDLE
@@ -552,14 +592,11 @@ def _apply_min_profit_filter(
     charge_blocks2    = get_blocks(working, CHARGE_ACTIONS)
     used_charge: set[int] = set()
 
-    # Build set of discharge block index ranges already kept in Pass 1
-    # so Pass 2 doesn't re-evaluate or suppress them
     kept_discharge_ranges: set[tuple] = set()
     for didx in used_discharge:
         kept_discharge_ranges.add(discharge_blocks[didx])
 
     for db_s, db_e in discharge_blocks2:
-        # Skip if this block was already validated in Pass 1
         if (db_s, db_e) in kept_discharge_ranges:
             continue
 
@@ -573,15 +610,22 @@ def _apply_min_profit_filter(
 
         nearest = min(candidates, key=lambda c: c[1])
         cidx, cb_s, cb_e = nearest
-        spread = discharge_rev(db_s, db_e) - charge_cost(cb_s, cb_e)
+        spread = block_spread(db_s, db_e, cb_s, cb_e)
 
         _LOGGER.debug("discharge→charge spread=%.4f vs min=%.4f", spread, min_profit_eur_per_kwh)
 
-        if spread < min_profit_eur_per_kwh:
-            suppress.update(range(db_s, db_e))
-            suppress.update(range(cb_s, cb_e))
-        else:
+        if spread >= min_profit_eur_per_kwh:
             used_charge.add(cidx)
+        else:
+            trimmed = best_trimmed(cb_s, cb_e, db_s, db_e)
+            if trimmed:
+                cs, ce, ds, de = trimmed
+                suppress.update(set(range(cb_s, cb_e)) - set(range(cs, ce)))
+                suppress.update(set(range(db_s, db_e)) - set(range(ds, de)))
+                used_charge.add(cidx)
+            else:
+                suppress.update(range(db_s, db_e))
+                suppress.update(range(cb_s, cb_e))
 
     result_actions = list(actions)
     result_kwh     = list(kwh)
