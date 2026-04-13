@@ -26,7 +26,8 @@
           "charge_energy": "Charge energy \u2014 grid kWh to go from min to max SoC",
           "discharge_energy": "Discharge energy \u2014 grid kWh delivered from max to min SoC",
           "charge_power": "Charge power (kW)",
-          "discharge_power": "Discharge power (kW)"
+          "discharge_power": "Discharge power (kW)",
+          "min_soc": "Minimum SoC (%) enforced by the battery"
         }
       },
       "schedule": {
@@ -66,7 +67,8 @@
           "charge_energy": "Charge energy \u2014 grid kWh to go from min to max SoC",
           "discharge_energy": "Discharge energy \u2014 grid kWh delivered from max to min SoC",
           "charge_power": "Charge power (kW)",
-          "discharge_power": "Discharge power (kW)"
+          "discharge_power": "Discharge power (kW)",
+          "min_soc": "Minimum SoC (%) enforced by the battery"
         }
       },
       "schedule": {

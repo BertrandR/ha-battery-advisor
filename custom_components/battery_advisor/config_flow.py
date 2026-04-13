@@ -11,11 +11,11 @@ from .const import (
     CONF_BATTERY_NAME,
     CONF_PRICE_ENTITY, CONF_RETURN_PRICE_FORMULA,
     CONF_CHARGE_ENERGY, CONF_DISCHARGE_ENERGY,
-    CONF_CHARGE_POWER, CONF_DISCHARGE_POWER,
+    CONF_CHARGE_POWER, CONF_DISCHARGE_POWER, CONF_MIN_SOC,
     CONF_DISCHARGE_USAGE_POWER, CONF_MIN_PROFIT,
     CONF_ZEN_SOC,
     DEFAULT_CHARGE_ENERGY, DEFAULT_DISCHARGE_ENERGY,
-    DEFAULT_CHARGE_POWER, DEFAULT_DISCHARGE_POWER,
+    DEFAULT_CHARGE_POWER, DEFAULT_DISCHARGE_POWER, DEFAULT_MIN_SOC,
     DEFAULT_DISCHARGE_USAGE_POWER, DEFAULT_MIN_PROFIT,
     DEFAULT_RETURN_PRICE_FORMULA,
 )
@@ -118,6 +118,9 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     default=d.get(CONF_CHARGE_POWER, DEFAULT_CHARGE_POWER)):      _pos_float(0),
                 vol.Required(CONF_DISCHARGE_POWER,
                     default=d.get(CONF_DISCHARGE_POWER, DEFAULT_DISCHARGE_POWER)): _pos_float(0),
+                vol.Required(CONF_MIN_SOC,
+                    default=d.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)):
+                    vol.All(vol.Coerce(int), vol.Range(min=0, max=50)),
             }),
             errors=errors,
         )
@@ -218,6 +221,9 @@ class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
                     default=d.get(CONF_CHARGE_POWER, DEFAULT_CHARGE_POWER)):      _pos_float(0),
                 vol.Required(CONF_DISCHARGE_POWER,
                     default=d.get(CONF_DISCHARGE_POWER, DEFAULT_DISCHARGE_POWER)): _pos_float(0),
+                vol.Required(CONF_MIN_SOC,
+                    default=d.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)):
+                    vol.All(vol.Coerce(int), vol.Range(min=0, max=50)),
             }),
         )
 

@@ -14,6 +14,7 @@ CONF_CHARGE_ENERGY      = "charge_energy"       # grid-side kWh to go min→max 
 CONF_DISCHARGE_ENERGY   = "discharge_energy"    # grid-side kWh delivered max→min SoC
 CONF_CHARGE_POWER       = "charge_power"        # kW grid-side charge rate
 CONF_DISCHARGE_POWER    = "discharge_power"     # kW grid-side discharge rate
+CONF_MIN_SOC            = "min_soc"             # minimum SoC % the battery enforces
 
 # ── Installation ──────────────────────────────────────────────────────────────
 CONF_DISCHARGE_USAGE_POWER  = "discharge_usage_power"   # kW assumed drain in usage mode
@@ -29,6 +30,7 @@ DEFAULT_CHARGE_ENERGY       = 7.9    # kWh  (measured)
 DEFAULT_DISCHARGE_ENERGY    = 6.44   # kWh  (measured)
 DEFAULT_CHARGE_POWER        = 2.4    # kW
 DEFAULT_DISCHARGE_POWER     = 2.4    # kW
+DEFAULT_MIN_SOC             = 0      # %
 DEFAULT_DISCHARGE_USAGE_POWER = 0.3  # kW
 DEFAULT_MIN_PROFIT          = 0.02   # EUR/kWh
 DEFAULT_RETURN_PRICE_FORMULA = ""  # empty = auto-detect (use native excl-tax if available)

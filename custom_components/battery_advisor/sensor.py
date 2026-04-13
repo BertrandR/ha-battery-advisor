@@ -5,9 +5,10 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
@@ -82,6 +83,64 @@ class BatteryActionSensor(_Base):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "current_action", "Current Action")
+        self._unsub_hourly = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+
+        @callback
+        def _on_new_hour(_now) -> None:
+            """Re-evaluate current slot from existing schedule on the hour."""
+            self._update_current_from_schedule()
+            self.async_write_ha_state()
+
+        self._unsub_hourly = async_track_time_change(
+            self.hass, _on_new_hour, minute=0, second=0
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub_hourly:
+            self._unsub_hourly()
+            self._unsub_hourly = None
+
+    @callback
+    def _update_current_from_schedule(self) -> None:
+        """Derive current_action and related fields from the schedule without a full coordinator refresh."""
+        from datetime import datetime, timezone
+        data = self.coordinator.data
+        if not data:
+            return
+        schedule = data.get("schedule", [])
+        if not schedule:
+            return
+        now_ts = datetime.now(timezone.utc).timestamp()
+        current = next(
+            (h for h in schedule if h["ts"] <= now_ts < h["ts"] + 3600),
+            None,
+        )
+        if current is None:
+            return
+        next_diff = next(
+            (h for h in schedule if h["ts"] > current["ts"] and h["action"] != current["action"]),
+            None,
+        )
+        next_charge = next(
+            (h for h in schedule if h["ts"] >= now_ts and h["action"] in {"charge_grid", "charge_solar"}),
+            None,
+        )
+        next_discharge = next(
+            (h for h in schedule if h["ts"] >= now_ts and h["action"] in {"discharge_grid", "discharge_usage"}),
+            None,
+        )
+        # Patch coordinator data in-place so all sensors reflect the updated hour
+        data["current_action"]       = current["action"]
+        data["current_price"]        = current["price"]
+        data["current_return_price"] = current["return_price"]
+        data["current_hour"]         = current["hour"]
+        data["next_action"]          = next_diff["action"] if next_diff else current["action"]
+        data["next_action_at"]       = next_diff["hour"]   if next_diff else None
+        data["next_charge_at"]       = next_charge["hour"]    if next_charge    else None
+        data["next_discharge_at"]    = next_discharge["hour"] if next_discharge else None
 
     @property
     def state(self):
@@ -244,6 +303,7 @@ class BatteryScheduleSensor(_Base):
             "battery_discharge_time": d.get("battery_discharge_time"),
             "battery_usable_kwh":     d.get("battery_usable_kwh"),
             "battery_eff":            d.get("battery_eff"),
+            "battery_min_soc":        d.get("battery_min_soc"),
             "planned_soc":            d.get("planned_soc"),
             "price_entity":           d.get("price_entity"),
             "last_updated":           d.get("last_updated"),

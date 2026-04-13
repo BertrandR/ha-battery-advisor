@@ -303,12 +303,15 @@ def _optimize_schedule(
     initial_soc_pct: float | None = None,
     discharge_usage_power: float = DEFAULT_DISCHARGE_USAGE_POWER,
     daylight_mask: list[bool] | None = None,
+    min_soc_pct: float = 0.0,
 ) -> list[dict]:
     """
     Globally optimal charge/discharge schedule via backward dynamic programming.
 
     State space : (hour t, SoC grid index s)
-    SoC grid    : N points spanning [0, usable_kwh] in SOC_STEP_KWH increments
+    SoC grid    : N points spanning [min_kwh, usable_kwh] in SOC_STEP_KWH increments
+                  where min_kwh = min_soc_pct / 100 × usable_kwh.
+                  The battery will not discharge below min_soc_pct.
 
     Four actions per slot:
       charge_grid     — pay buy_price  × charge_kwh_per_hour   (always)
@@ -330,10 +333,21 @@ def _optimize_schedule(
     if daylight_mask is None:
         daylight_mask = [True] * T
 
-    eff  = battery.eff
+    eff     = battery.eff
+    min_kwh = max(0.0, min_soc_pct / 100.0 * battery.usable_kwh)
+
+    # SoC grid spans [min_kwh, usable_kwh]
+    usable_range = battery.usable_kwh - min_kwh
     step = SOC_STEP_KWH
-    N    = max(2, round(battery.usable_kwh / step)) + 1
-    step = battery.usable_kwh / (N - 1)
+    N    = max(2, round(usable_range / step)) + 1
+    step = usable_range / (N - 1) if N > 1 else usable_range
+
+    # s=0 corresponds to min_kwh, s=N-1 corresponds to usable_kwh
+    def kwh_to_s(kwh: float) -> int:
+        return min(N - 1, max(0, round((kwh - min_kwh) / step)))
+
+    def s_to_kwh(s: int) -> float:
+        return min_kwh + s * step
 
     # Battery-side SoC steps per action at rated power
     charge_steps        = max(1, round(battery.charge_soc_per_hour    / step))
@@ -396,20 +410,24 @@ def _optimize_schedule(
         val_next = val_cur
 
     # ── Forward pass ─────────────────────────────────────────────────────────
-    init_kwh = battery.soc_to_kwh(initial_soc_pct) if initial_soc_pct is not None else battery.usable_kwh * 0.5
-    if initial_soc_pct is None:
+    if initial_soc_pct is not None:
+        init_kwh = battery.soc_to_kwh(initial_soc_pct)
+        # Clamp starting SoC to the usable range [min_kwh, usable_kwh]
+        init_kwh = max(min_kwh, min(battery.usable_kwh, init_kwh))
+    else:
+        init_kwh = min_kwh + (battery.usable_kwh - min_kwh) * 0.5
         _LOGGER.warning(
-            "No live SoC available — assuming 50%% (%.2f kWh). "
-            "Configure a Zendure SoC entity for accurate scheduling.",
-            battery.usable_kwh * 0.5,
+            "No live SoC available — assuming mid-range (%.2f kWh). "
+            "Configure a SoC entity for accurate scheduling.",
+            init_kwh,
         )
-    soc_kwh  = init_kwh
+    soc_kwh = init_kwh
 
     raw_actions: list[str]  = []
     raw_kwh:    list[float] = []
 
     for t in range(T):
-        s   = min(N - 1, max(0, round(soc_kwh / step)))
+        s   = kwh_to_s(soc_kwh)
         act = policy[t][s]
         raw_actions.append(act)
 
@@ -421,12 +439,12 @@ def _optimize_schedule(
         elif act == ACTION_DISCHARGE_GRID:
             sd       = min(discharge_steps, s)
             grid_out = sd * discharge_grid_kwh_per_step
-            soc_kwh  = max(0.0, soc_kwh - sd * step)
+            soc_kwh  = max(min_kwh, soc_kwh - sd * step)
             raw_kwh.append(round(grid_out, 3))
         elif act == ACTION_DISCHARGE_USAGE:
             su2      = min(usage_steps, s)
             grid_out = su2 * discharge_grid_kwh_per_step
-            soc_kwh  = max(0.0, soc_kwh - su2 * step)
+            soc_kwh  = max(min_kwh, soc_kwh - su2 * step)
             raw_kwh.append(round(grid_out, 3))
         else:
             raw_kwh.append(0.0)
@@ -677,6 +695,7 @@ def _annotate_estimated_soc(
     schedule: list[dict],
     battery: BatteryModel,
     initial_soc_pct: float | None,
+    min_soc_pct: float = 0.0,
 ) -> list[dict]:
     """
     Add estimated_soc (%) to each slot in the schedule.
@@ -686,7 +705,7 @@ def _annotate_estimated_soc(
 
     Charge slots increase SoC by kwh × eff / usable_kwh × 100.
     Discharge slots decrease SoC by kwh / eff / usable_kwh × 100.
-    Idle slots leave SoC unchanged.
+    Idle slots leave SoC unchanged. SoC is clamped to [min_soc_pct, 100].
     """
     if not schedule:
         return schedule
@@ -701,14 +720,14 @@ def _annotate_estimated_soc(
         kwh = slot["kwh"]
 
         # Record SoC at start of this slot
-        estimated = round(max(0.0, min(100.0, soc)), 1)
+        estimated = round(max(min_soc_pct, min(100.0, soc)), 1)
 
         if act in CHARGE_ACTIONS:
             soc += kwh * eff / usable * 100.0
         elif act in DISCHARGE_ACTIONS:
             soc -= kwh / eff / usable * 100.0
 
-        soc = max(0.0, min(100.0, soc))
+        soc = max(min_soc_pct, min(100.0, soc))
         result.append({**slot, "estimated_soc": estimated})
 
     return result
@@ -738,6 +757,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         discharge_energy: float,
         charge_power: float,
         discharge_power: float,
+        min_soc: int = 0,
         min_profit: float = 0.0,
         discharge_usage_power: float = DEFAULT_DISCHARGE_USAGE_POWER,
         return_price_formula: str = DEFAULT_RETURN_PRICE_FORMULA,
@@ -752,12 +772,13 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         self.battery_name           = battery_name
         self.price_entity_id        = price_entity_id
         self.battery                = BatteryModel(charge_energy, discharge_energy, charge_power, discharge_power)
+        self.min_soc                = min_soc
         self.min_profit             = min_profit
         self._discharge_usage_power = discharge_usage_power
         self._return_price_formula  = return_price_formula
         self.zen_soc_entity         = zen_soc_entity or ""
 
-        _LOGGER.debug("[%s] Coordinator initialised: %s", self.battery_name, self.battery)
+        _LOGGER.debug("[%s] Coordinator initialised: %s min_soc=%d%%", self.battery_name, self.battery, self.min_soc)
 
     async def async_setup(self) -> None:
         """No custom listeners — polling handled by update_interval."""
@@ -783,12 +804,14 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         # 2. Daylight mask
         daylight_mask = [_is_daylight(self.hass, p["ts"]) for p in prices]
 
-        # 3. Live SoC
+        # 3. Live SoC — clamp to [min_soc, 100] since the battery won't go below min_soc
         live_soc = _read_soc(self.hass, self.zen_soc_entity)
+        if live_soc is not None:
+            live_soc = max(float(self.min_soc), min(100.0, live_soc))
 
         _LOGGER.debug(
-            "[%s] Coordinator update — zen_soc_entity=%r live_soc=%s slots=%d min_profit=%.3f",
-            self.battery_name, self.zen_soc_entity, live_soc, len(prices), self.min_profit,
+            "[%s] Coordinator update — zen_soc_entity=%r live_soc=%s slots=%d min_profit=%.3f min_soc=%d%%",
+            self.battery_name, self.zen_soc_entity, live_soc, len(prices), self.min_profit, self.min_soc,
         )
 
         # 4. Optimise
@@ -800,6 +823,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
                 initial_soc_pct=live_soc,
                 discharge_usage_power=self._discharge_usage_power,
                 daylight_mask=daylight_mask,
+                min_soc_pct=self.min_soc,
             )
         except Exception as err:
             _LOGGER.error("Optimisation failed: %s", err, exc_info=True)
@@ -815,7 +839,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         )
 
         # 5. Annotate schedule with estimated_soc per slot
-        schedule = _annotate_estimated_soc(schedule, self.battery, live_soc)
+        schedule = _annotate_estimated_soc(schedule, self.battery, live_soc, float(self.min_soc))
 
         # 6. Derive current-hour values
         current = next(
@@ -853,4 +877,5 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             "battery_discharge_time": round(self.battery.discharge_time, 2),
             "battery_usable_kwh":     round(self.battery.usable_kwh, 3),
             "battery_eff":            round(self.battery.eff, 4),
+            "battery_min_soc":        self.min_soc,
         }
