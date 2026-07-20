@@ -22,6 +22,8 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 SOC_STEP_KWH = 0.05  # 0.05 kWh fine grid — derived from energy values, not fixed power steps
+SLOT_SECONDS_HOUR    = 3600   # legacy hourly slot duration
+SLOT_SECONDS_QUARTER = 900    # 15-minute slot duration
 
 
 # ---------------------------------------------------------------------------
@@ -64,15 +66,16 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
     now_ts   = now.timestamp()
     use_formula = bool(return_formula)  # non-empty = explicit override, always apply
 
-    def _slot(dt, buy_mwh, ret_mwh=None):
+    def _slot(dt, buy_mwh, ret_mwh=None, slot_secs=SLOT_SECONDS_HOUR):
         if ret_mwh is None:
             ret_mwh = _apply_return_formula(buy_mwh, return_formula)
         return {
             "ts":           dt.timestamp(),
             "datetime":     dt.isoformat(),
-            "hour":         dt.astimezone().strftime("%H:00"),
+            "hour":         dt.astimezone().strftime("%H:%M"),
             "price":        round(buy_mwh, 2),
             "return_price": round(ret_mwh, 2),
+            "slot_seconds": slot_secs,
         }
 
     # ── Format 1: Nordpool ────────────────────────────────────────────────────
@@ -91,10 +94,10 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
                 dt = datetime.fromisoformat(str(start)) if isinstance(start, str) else start
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                if dt.timestamp() < now_ts - 3600:
+                if dt.timestamp() < now_ts - SLOT_SECONDS_HOUR:
                     continue
                 buy = _to_eur_mwh(float(value), attrs)
-                prices.append(_slot(dt, buy))
+                prices.append(_slot(dt, buy, slot_secs=SLOT_SECONDS_HOUR))
             except Exception:
                 continue
         if prices:
@@ -104,32 +107,72 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
     forecast = attrs.get("forecast")
     if forecast and isinstance(forecast, (list, tuple)) and len(forecast) > 0:
         first = forecast[0]
-        if isinstance(first, dict) and "electricity_price" in first and "datetime" in first:
-            prices = []
-            for slot in forecast:
-                try:
-                    dt_str  = slot.get("datetime", "")
-                    raw_buy = slot.get("electricity_price")
-                    raw_ret = slot.get("electricity_price_excl_tax")
-                    if not dt_str or raw_buy is None:
+        if isinstance(first, dict):
+
+            # New 15-minute format: start_date + price_tax_included.amount
+            if "start_date" in first and "price_tax_included" in first:
+                prices = []
+                for slot in forecast:
+                    try:
+                        dt_str  = slot.get("start_date", "")
+                        end_str = slot.get("end_date", "")
+                        tax_inc = slot.get("price_tax_included") or {}
+                        tax_exc = slot.get("price_tax_excluded") or {}
+                        raw_buy = tax_inc.get("amount") if isinstance(tax_inc, dict) else None
+                        raw_ret = tax_exc.get("amount") if isinstance(tax_exc, dict) else None
+                        if not dt_str or raw_buy is None:
+                            continue
+                        dt = datetime.fromisoformat(dt_str.rstrip("Z"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if dt.timestamp() < now_ts - SLOT_SECONDS_QUARTER:
+                            continue
+                        # Infer slot duration from start/end dates
+                        if end_str:
+                            end_dt = datetime.fromisoformat(end_str.rstrip("Z"))
+                            if end_dt.tzinfo is None:
+                                end_dt = end_dt.replace(tzinfo=timezone.utc)
+                            slot_secs = int((end_dt - dt).total_seconds())
+                        else:
+                            slot_secs = SLOT_SECONDS_QUARTER
+                        buy_mwh = float(raw_buy) / 10_000_000 * 1000
+                        if use_formula:
+                            ret_mwh = _apply_return_formula(buy_mwh, return_formula)
+                        elif raw_ret is not None:
+                            ret_mwh = float(raw_ret) / 10_000_000 * 1000
+                        else:
+                            ret_mwh = buy_mwh
+                        prices.append(_slot(dt, buy_mwh, ret_mwh, slot_secs))
+                    except Exception:
                         continue
-                    dt = datetime.fromisoformat(dt_str.rstrip("Z").split(".")[0]).replace(tzinfo=timezone.utc)
-                    if dt.timestamp() < now_ts - 3600:
+                if prices:
+                    return sorted(prices, key=lambda x: x["ts"])
+
+            # Legacy hourly format: datetime + electricity_price
+            if "electricity_price" in first and "datetime" in first:
+                prices = []
+                for slot in forecast:
+                    try:
+                        dt_str  = slot.get("datetime", "")
+                        raw_buy = slot.get("electricity_price")
+                        raw_ret = slot.get("electricity_price_excl_tax")
+                        if not dt_str or raw_buy is None:
+                            continue
+                        dt = datetime.fromisoformat(dt_str.rstrip("Z").split(".")[0]).replace(tzinfo=timezone.utc)
+                        if dt.timestamp() < now_ts - SLOT_SECONDS_HOUR:
+                            continue
+                        buy_mwh = float(raw_buy) / 10_000_000 * 1000
+                        if use_formula:
+                            ret_mwh = _apply_return_formula(buy_mwh, return_formula)
+                        elif raw_ret is not None:
+                            ret_mwh = float(raw_ret) / 10_000_000 * 1000
+                        else:
+                            ret_mwh = buy_mwh
+                        prices.append(_slot(dt, buy_mwh, ret_mwh, SLOT_SECONDS_HOUR))
+                    except Exception:
                         continue
-                    buy_mwh = float(raw_buy) / 10_000_000 * 1000
-                    if use_formula:
-                        # Explicit formula set — apply it (e.g. "current_price" = equal tariffs)
-                        ret_mwh = _apply_return_formula(buy_mwh, return_formula)
-                    elif raw_ret is not None:
-                        # Auto-detect: use Zonneplan's native excl-tax field
-                        ret_mwh = float(raw_ret) / 10_000_000 * 1000
-                    else:
-                        ret_mwh = buy_mwh
-                    prices.append(_slot(dt, buy_mwh, ret_mwh))
-                except Exception:
-                    continue
-            if prices:
-                return sorted(prices, key=lambda x: x["ts"])
+                if prices:
+                    return sorted(prices, key=lambda x: x["ts"])
 
     # ── Format 3: Tibber ──────────────────────────────────────────────────────
     tibber = attrs.get("prices")
@@ -142,10 +185,10 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
                     dt = datetime.fromisoformat(slot["startsAt"])
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
-                    if dt.timestamp() < now_ts - 3600:
+                    if dt.timestamp() < now_ts - SLOT_SECONDS_HOUR:
                         continue
                     buy = _to_eur_mwh(float(slot.get("total") or slot.get("energy") or 0), attrs)
-                    prices.append(_slot(dt, buy))
+                    prices.append(_slot(dt, buy, slot_secs=SLOT_SECONDS_HOUR))
                 except Exception:
                     continue
             if prices:
@@ -162,10 +205,10 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
                     if value is None:
                         continue
                     dt = midnight + timedelta(hours=i)
-                    if dt.timestamp() < now_ts - 3600:
+                    if dt.timestamp() < now_ts - SLOT_SECONDS_HOUR:
                         continue
                     buy = _to_eur_mwh(float(value), attrs)
-                    prices.append(_slot(dt, buy))
+                    prices.append(_slot(dt, buy, slot_secs=SLOT_SECONDS_HOUR))
                 if prices:
                     return prices
 
@@ -336,6 +379,10 @@ def _optimize_schedule(
     eff     = battery.eff
     min_kwh = max(0.0, min_soc_pct / 100.0 * battery.usable_kwh)
 
+    # Derive slot duration from price data (supports both hourly and 15-min slots)
+    slot_secs  = prices[0].get("slot_seconds", SLOT_SECONDS_HOUR) if prices else SLOT_SECONDS_HOUR
+    slot_hours = slot_secs / SLOT_SECONDS_HOUR   # 1.0 for hourly, 0.25 for 15-min
+
     # SoC grid spans [min_kwh, usable_kwh]
     usable_range = battery.usable_kwh - min_kwh
     step = SOC_STEP_KWH
@@ -349,12 +396,12 @@ def _optimize_schedule(
     def s_to_kwh(s: int) -> float:
         return min_kwh + s * step
 
-    # Battery-side SoC steps per action at rated power
-    charge_steps        = max(1, round(battery.charge_soc_per_hour    / step))
-    discharge_steps     = max(1, round(battery.discharge_soc_per_hour / step))
-    # discharge_usage: battery drains at usage_power / eff per hour
-    usage_soc_per_hour  = discharge_usage_power / eff
-    usage_steps         = max(1, round(usage_soc_per_hour / step))
+    # Battery-side SoC steps per action at rated power, scaled to slot duration
+    charge_steps        = max(1, round(battery.charge_soc_per_hour    * slot_hours / step))
+    discharge_steps     = max(1, round(battery.discharge_soc_per_hour * slot_hours / step))
+    # discharge_usage: battery drains at usage_power / eff per slot
+    usage_soc_per_slot  = discharge_usage_power / eff * slot_hours
+    usage_steps         = max(1, round(usage_soc_per_slot / step))
 
     # Grid-side kWh per step (for cost/revenue calculation)
     charge_grid_kwh_per_step    = step / eff          # kWh drawn per battery-step charged
@@ -455,9 +502,9 @@ def _optimize_schedule(
             min_profit_eur, eff,
         )
 
-    nom_charge    = battery.charge_kwh_per_hour
-    nom_discharge = battery.discharge_kwh_per_hour
-    nom_usage     = discharge_usage_power
+    nom_charge    = battery.charge_kwh_per_hour    * slot_hours
+    nom_discharge = battery.discharge_kwh_per_hour * slot_hours
+    nom_usage     = discharge_usage_power          * slot_hours
 
     return [{
         **prices[t],
@@ -841,9 +888,9 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         # 5. Annotate schedule with estimated_soc per slot
         schedule = _annotate_estimated_soc(schedule, self.battery, live_soc, float(self.min_soc))
 
-        # 6. Derive current-hour values
+        # 6. Derive current-slot values
         current = next(
-            (h for h in schedule if h["ts"] <= now_ts < h["ts"] + 3600),
+            (h for h in schedule if h["ts"] <= now_ts < h["ts"] + h.get("slot_seconds", SLOT_SECONDS_HOUR)),
             schedule[0],
         )
         next_diff = next(

@@ -95,7 +95,7 @@ class BatteryActionSensor(_Base):
             self.async_write_ha_state()
 
         self._unsub_hourly = async_track_time_change(
-            self.hass, _on_new_hour, minute=0, second=0
+            self.hass, _on_new_hour, minute=[0, 15, 30, 45], second=0
         )
 
     async def async_will_remove_from_hass(self) -> None:
@@ -115,7 +115,7 @@ class BatteryActionSensor(_Base):
             return
         now_ts = datetime.now(timezone.utc).timestamp()
         current = next(
-            (h for h in schedule if h["ts"] <= now_ts < h["ts"] + 3600),
+            (h for h in schedule if h["ts"] <= now_ts < h["ts"] + h.get("slot_seconds", 3600)),
             None,
         )
         if current is None:
@@ -280,6 +280,7 @@ class BatteryScheduleSensor(_Base):
         b        = self.coordinator.battery
 
         def _unique_hours(actions):
+            """Return deduplicated list of slot time strings (HH:MM) for the given action types."""
             seen = set()
             result = []
             for h in schedule:

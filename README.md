@@ -171,7 +171,7 @@ automation:
 ```yaml
 {% set schedule = state_attr('sensor.battery_advisor_schedule', 'schedule') %}
 {# Note: 'hour' is local time only — use 'datetime' for unambiguous cross-day lookups #}
-{% set h = now().strftime('%H:00') %}
+{% set h = now().strftime('%H:%M') %}
 {{ (schedule | selectattr('hour', 'eq', h) | list | first).action }}
 ```
 
