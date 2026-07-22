@@ -607,11 +607,14 @@ def _apply_min_profit_filter(
 
     suppress: set[int] = set()
 
-    # ── Pass 1: charge → nearest following discharge ──────────────────────────
+    # ── Pass 1: charge → nearest profitable following discharge ──────────────
     charge_blocks    = get_blocks(actions, CHARGE_ACTIONS)
     discharge_blocks = get_blocks(actions, DISCHARGE_ACTIONS)
     used_discharge: set[int] = set()
-
+    # average revenue is below the charge cost when a more profitable option
+    # exists later. This prevents micro-discharges at mediocre prices from
+    # consuming a large charge block and leaving the main high-value discharge
+    # without a charge pair.
     for cb_s, cb_e in charge_blocks:
         candidates = [
             (i, db_s, db_e)
@@ -622,8 +625,28 @@ def _apply_min_profit_filter(
             suppress.update(range(cb_s, cb_e))
             continue
 
+        cc = sum(slot_charge_cost(h) for h in range(cb_s, cb_e)) / (cb_e - cb_s)
+
+        # Pairing strategy: nearest-first, but if the nearest discharge doesn't
+        # clear min_profit AND a later discharge does, use the later one.
+        # This prevents a micro-discharge at a mediocre price from consuming a
+        # large charge block when a high-value discharge exists further out.
         nearest = min(candidates, key=lambda c: c[1])
-        didx, db_s, db_e = nearest
+        nearest_spread = block_spread(cb_s, cb_e, nearest[1], nearest[2])
+
+        if nearest_spread >= min_profit_eur_per_kwh:
+            # Nearest is profitable — use it (preserves temporal locality)
+            didx, db_s, db_e = nearest
+        else:
+            # Nearest fails — check if any candidate clears the threshold
+            passing = [c for c in candidates if block_spread(cb_s, cb_e, c[1], c[2]) >= min_profit_eur_per_kwh]
+            if passing:
+                # Use the nearest passing candidate
+                didx, db_s, db_e = min(passing, key=lambda c: c[1])
+            else:
+                # Nothing passes — try trimming on nearest (smallest charge needed)
+                didx, db_s, db_e = nearest
+
         spread = block_spread(cb_s, cb_e, db_s, db_e)
 
         _LOGGER.debug("charge→discharge spread=%.4f vs min=%.4f", spread, min_profit_eur_per_kwh)
