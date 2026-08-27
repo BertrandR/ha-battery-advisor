@@ -7,17 +7,26 @@
           "battery_name": "Name"
         },
         "data_description": {
-          "battery_name": "A unique name for this battery (e.g. 'Zendure AIO' or 'Simulated 10kWh'). Used to identify its sensors."
+          "battery_name": "A unique name for this battery (e.g. 'Zendure AIO'). Used to identify its sensors."
+        }
+      },
+      "price_source": {
+        "title": "Price Source",
+        "data": {
+          "price_source": "Price source"
+        },
+        "data_description": {
+          "price_source": "Choose where Battery Advisor reads electricity prices from."
         }
       },
       "price": {
-        "title": "Price Sensor",
+        "title": "Price Settings",
         "data": {
           "price_entity_id": "Price sensor entity",
-          "return_price_formula": "Return price formula (empty = auto; 'current_price' = same as buy; e.g. 'current_price / 1.21' to strip VAT)"
+          "return_price_formula": "Return price formula (empty = auto-detect; 'current_price' = same as buy)"
         },
         "data_description": {
-          "return_price_formula": "Leave empty to use the native return tariff from your sensor (Zonneplan: electricity_price_excl_tax). Set to 'current_price' to use the same price for both buy and sell. Variable available: current_price (EUR/MWh)."
+          "return_price_formula": "Leave empty to use the native return tariff from your sensor or API (Zonneplan: electricity_price_excl_tax). Set to 'current_price' to treat buy and sell as equal. Variable: current_price (EUR/MWh)."
         }
       },
       "battery": {
@@ -51,14 +60,20 @@
   },
   "options": {
     "step": {
+      "price_source": {
+        "title": "Price Source",
+        "data": {
+          "price_source": "Price source"
+        }
+      },
       "price": {
-        "title": "Price Sensor",
+        "title": "Price Settings",
         "data": {
           "price_entity_id": "Price sensor entity",
-          "return_price_formula": "Return price formula (empty = auto; 'current_price' = same as buy; e.g. 'current_price / 1.21' to strip VAT)"
+          "return_price_formula": "Return price formula (empty = auto-detect; 'current_price' = same as buy)"
         },
         "data_description": {
-          "return_price_formula": "Leave empty to use the native return tariff from your sensor (Zonneplan: electricity_price_excl_tax). Set to 'current_price' to use the same price for both buy and sell. Variable available: current_price (EUR/MWh)."
+          "return_price_formula": "Leave empty to use the native return tariff from your sensor or API (Zonneplan: electricity_price_excl_tax). Set to 'current_price' to treat buy and sell as equal. Variable: current_price (EUR/MWh)."
         }
       },
       "battery": {

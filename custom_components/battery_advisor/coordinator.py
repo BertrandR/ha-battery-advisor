@@ -6,6 +6,8 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import aiohttp
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -17,6 +19,8 @@ from .const import (
     CHARGE_ACTIONS, DISCHARGE_ACTIONS,
     DEFAULT_DISCHARGE_USAGE_POWER,
     DEFAULT_RETURN_PRICE_FORMULA,
+    PRICE_SOURCE_SENSOR, PRICE_SOURCE_ZONNEPLAN_API,
+    ZONNEPLAN_API_URL_QUARTER,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -104,37 +108,79 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
             return sorted(prices, key=lambda x: x["ts"])
 
     # ── Format 2: Zonneplan ONE ───────────────────────────────────────────────
+    # Detects three Zonneplan forecast formats:
+    #   A. start_date + price_tax_included.amount  (15-min, older new format)
+    #   B. start_date + electricity_price          (new hybrid format)
+    #   C. datetime   + electricity_price          (legacy hourly format)
     forecast = attrs.get("forecast")
     if forecast and isinstance(forecast, (list, tuple)) and len(forecast) > 0:
         first = forecast[0]
         if isinstance(first, dict):
 
-            # New 15-minute format: start_date + price_tax_included.amount
-            if "start_date" in first and "price_tax_included" in first:
+            # Detect format variant
+            has_start_date    = "start_date" in first
+            has_tax_included  = "price_tax_included" in first
+            has_elec_price    = "electricity_price" in first
+            has_datetime      = "datetime" in first
+
+            is_format_a = has_start_date and has_tax_included
+            is_format_b = has_start_date and has_elec_price
+            is_format_c = has_datetime   and has_elec_price
+
+            if is_format_a or is_format_b or is_format_c:
                 prices = []
                 for slot in forecast:
                     try:
-                        dt_str  = slot.get("start_date", "")
-                        end_str = slot.get("end_date", "")
-                        tax_inc = slot.get("price_tax_included") or {}
-                        tax_exc = slot.get("price_tax_excluded") or {}
-                        raw_buy = tax_inc.get("amount") if isinstance(tax_inc, dict) else None
-                        raw_ret = tax_exc.get("amount") if isinstance(tax_exc, dict) else None
-                        if not dt_str or raw_buy is None:
+                        if is_format_a or is_format_b:
+                            dt_str = slot.get("start_date", "")
+                            end_str = slot.get("end_date", "")
+                        else:
+                            dt_str = slot.get("datetime", "")
+                            end_str = ""
+
+                        if not dt_str:
                             continue
+
                         dt = datetime.fromisoformat(dt_str.rstrip("Z"))
                         if dt.tzinfo is None:
                             dt = dt.replace(tzinfo=timezone.utc)
-                        if dt.timestamp() < now_ts - SLOT_SECONDS_QUARTER:
-                            continue
-                        # Infer slot duration from start/end dates
+
+                        # Infer slot duration
                         if end_str:
                             end_dt = datetime.fromisoformat(end_str.rstrip("Z"))
                             if end_dt.tzinfo is None:
                                 end_dt = end_dt.replace(tzinfo=timezone.utc)
                             slot_secs = int((end_dt - dt).total_seconds())
+                        elif is_format_b and has_datetime:
+                            # start_date + datetime both present — use difference
+                            dt2_str = slot.get("datetime", "")
+                            if dt2_str:
+                                dt2 = datetime.fromisoformat(dt2_str.rstrip("Z"))
+                                if dt2.tzinfo is None:
+                                    dt2 = dt2.replace(tzinfo=timezone.utc)
+                                # slot spans from dt2 to dt2 + (dt - dt2_next)
+                                # safest: assume hourly unless we can prove otherwise
+                            slot_secs = SLOT_SECONDS_HOUR
                         else:
-                            slot_secs = SLOT_SECONDS_QUARTER
+                            slot_secs = SLOT_SECONDS_HOUR
+
+                        # Filter cutoff
+                        if dt.timestamp() < now_ts - slot_secs:
+                            continue
+
+                        # Extract prices
+                        if is_format_a:
+                            tax_inc = slot.get("price_tax_included") or {}
+                            tax_exc = slot.get("price_tax_excluded") or {}
+                            raw_buy = tax_inc.get("amount") if isinstance(tax_inc, dict) else None
+                            raw_ret = tax_exc.get("amount") if isinstance(tax_exc, dict) else None
+                        else:
+                            raw_buy = slot.get("electricity_price")
+                            raw_ret = slot.get("electricity_price_excl_tax")
+
+                        if raw_buy is None:
+                            continue
+
                         buy_mwh = float(raw_buy) / 10_000_000 * 1000
                         if use_formula:
                             ret_mwh = _apply_return_formula(buy_mwh, return_formula)
@@ -142,35 +188,11 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
                             ret_mwh = float(raw_ret) / 10_000_000 * 1000
                         else:
                             ret_mwh = buy_mwh
+
                         prices.append(_slot(dt, buy_mwh, ret_mwh, slot_secs))
                     except Exception:
                         continue
-                if prices:
-                    return sorted(prices, key=lambda x: x["ts"])
 
-            # Legacy hourly format: datetime + electricity_price
-            if "electricity_price" in first and "datetime" in first:
-                prices = []
-                for slot in forecast:
-                    try:
-                        dt_str  = slot.get("datetime", "")
-                        raw_buy = slot.get("electricity_price")
-                        raw_ret = slot.get("electricity_price_excl_tax")
-                        if not dt_str or raw_buy is None:
-                            continue
-                        dt = datetime.fromisoformat(dt_str.rstrip("Z").split(".")[0]).replace(tzinfo=timezone.utc)
-                        if dt.timestamp() < now_ts - SLOT_SECONDS_HOUR:
-                            continue
-                        buy_mwh = float(raw_buy) / 10_000_000 * 1000
-                        if use_formula:
-                            ret_mwh = _apply_return_formula(buy_mwh, return_formula)
-                        elif raw_ret is not None:
-                            ret_mwh = float(raw_ret) / 10_000_000 * 1000
-                        else:
-                            ret_mwh = buy_mwh
-                        prices.append(_slot(dt, buy_mwh, ret_mwh, SLOT_SECONDS_HOUR))
-                    except Exception:
-                        continue
                 if prices:
                     return sorted(prices, key=lambda x: x["ts"])
 
@@ -804,6 +826,94 @@ def _annotate_estimated_soc(
 
 
 # ---------------------------------------------------------------------------
+# Zonneplan API price fetching
+# ---------------------------------------------------------------------------
+
+async def _fetch_zonneplan_api(return_formula: str) -> list[dict]:
+    """
+    Fetch quarter-hourly prices from the public Zonneplan API.
+
+    Returns a list of price dicts in the same format as _extract_prices output,
+    or raises an exception if the request fails.
+    """
+    now_ts = datetime.now(timezone.utc).timestamp()
+    cutoff = now_ts - SLOT_SECONDS_QUARTER
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(ZONNEPLAN_API_URL_QUARTER) as resp:
+            resp.raise_for_status()
+            body = await resp.json(content_type=None)
+
+    # Response structure: {"data": {"chart": {"series": {"prices": [...]}}}}
+    prices_raw = (
+        body.get("data", {})
+            .get("chart", {})
+            .get("series", {})
+            .get("prices", [])
+    )
+    if not prices_raw:
+        raise ValueError("Zonneplan API returned empty prices list")
+
+    use_formula = bool(return_formula)
+
+    def _apply_return_formula(buy_mwh: float) -> float:
+        if not return_formula:
+            return buy_mwh
+        try:
+            return float(eval(  # noqa: S307
+                return_formula,
+                {"__builtins__": {}},
+                {"current_price": buy_mwh},
+            ))
+        except Exception:
+            return buy_mwh
+
+    prices = []
+    for slot in prices_raw:
+        try:
+            dt_str  = slot.get("start_date", "")
+            end_str = slot.get("end_date", "")
+            tax_inc = slot.get("price_tax_included") or {}
+            tax_exc = slot.get("price_tax_excluded") or {}
+            raw_buy = tax_inc.get("amount") if isinstance(tax_inc, dict) else None
+            raw_ret = tax_exc.get("amount") if isinstance(tax_exc, dict) else None
+            if not dt_str or raw_buy is None:
+                continue
+            dt = datetime.fromisoformat(dt_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt.timestamp() < cutoff:
+                continue
+            if end_str:
+                end_dt = datetime.fromisoformat(end_str)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                slot_secs = int((end_dt - dt).total_seconds())
+            else:
+                slot_secs = SLOT_SECONDS_QUARTER
+            buy_mwh = float(raw_buy) / 10_000_000 * 1000
+            if use_formula:
+                ret_mwh = _apply_return_formula(buy_mwh)
+            elif raw_ret is not None:
+                ret_mwh = float(raw_ret) / 10_000_000 * 1000
+            else:
+                ret_mwh = buy_mwh
+            prices.append({
+                "ts":           dt.timestamp(),
+                "datetime":     dt.isoformat(),
+                "hour":         dt.astimezone().strftime("%H:%M"),
+                "price":        round(buy_mwh, 2),
+                "return_price": round(ret_mwh, 2),
+                "slot_seconds": slot_secs,
+            })
+        except Exception:
+            continue
+
+    return sorted(prices, key=lambda x: x["ts"])
+
+
+# ---------------------------------------------------------------------------
 # Coordinator
 # ---------------------------------------------------------------------------
 
@@ -822,6 +932,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         self,
         hass: HomeAssistant,
         battery_name: str,
+        price_source: str,
         price_entity_id: str,
         charge_energy: float,
         discharge_energy: float,
@@ -840,6 +951,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=15),
         )
         self.battery_name           = battery_name
+        self.price_source           = price_source
         self.price_entity_id        = price_entity_id
         self.battery                = BatteryModel(charge_energy, discharge_energy, charge_power, discharge_power)
         self.min_soc                = min_soc
@@ -847,8 +959,10 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         self._discharge_usage_power = discharge_usage_power
         self._return_price_formula  = return_price_formula
         self.zen_soc_entity         = zen_soc_entity or ""
+        self._cached_api_prices: list[dict] = []   # last known prices for fallback
 
-        _LOGGER.debug("[%s] Coordinator initialised: %s min_soc=%d%%", self.battery_name, self.battery, self.min_soc)
+        _LOGGER.debug("[%s] Coordinator initialised: source=%s %s min_soc=%d%%",
+                      self.battery_name, self.price_source, self.battery, self.min_soc)
 
     async def async_setup(self) -> None:
         """No custom listeners — polling handled by update_interval."""
@@ -863,13 +977,32 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         now_ts = now.timestamp()
 
         # 1. Prices
-        state_obj = self.hass.states.get(self.price_entity_id)
-        if state_obj is None:
-            raise UpdateFailed(f"Price sensor '{self.price_entity_id}' not found")
-        try:
-            prices = _extract_prices(state_obj, self._return_price_formula)
-        except ValueError as err:
-            raise UpdateFailed(str(err)) from err
+        if self.price_source == PRICE_SOURCE_ZONNEPLAN_API:
+            try:
+                prices = await _fetch_zonneplan_api(self._return_price_formula)
+                if prices:
+                    self._cached_api_prices = prices
+                    _LOGGER.debug("[%s] Zonneplan API: %d slots fetched", self.battery_name, len(prices))
+                else:
+                    raise ValueError("No slots returned from Zonneplan API")
+            except Exception as err:
+                if self._cached_api_prices:
+                    _LOGGER.warning(
+                        "[%s] Zonneplan API fetch failed (%s) — using %d cached slots",
+                        self.battery_name, err, len(self._cached_api_prices),
+                    )
+                    prices = self._cached_api_prices
+                else:
+                    raise UpdateFailed(f"Zonneplan API unavailable and no cached prices: {err}") from err
+        else:
+            # HA sensor entity
+            state_obj = self.hass.states.get(self.price_entity_id)
+            if state_obj is None:
+                raise UpdateFailed(f"Price sensor '{self.price_entity_id}' not found")
+            try:
+                prices = _extract_prices(state_obj, self._return_price_formula)
+            except ValueError as err:
+                raise UpdateFailed(str(err)) from err
 
         # 2. Daylight mask
         daylight_mask = [_is_daylight(self.hass, p["ts"]) for p in prices]
@@ -938,7 +1071,7 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             "next_action_at":       next_diff["hour"]   if next_diff else None,
             "next_charge_at":       next_charge["hour"]    if next_charge    else None,
             "next_discharge_at":    next_discharge["hour"] if next_discharge else None,
-            "price_entity":         self.price_entity_id,
+            "price_entity":         self.price_entity_id if self.price_source == PRICE_SOURCE_SENSOR else ZONNEPLAN_API_URL_QUARTER,
             "zendure_soc":          live_soc,
             "planned_soc":          live_soc,
             "last_updated":         now.isoformat(),

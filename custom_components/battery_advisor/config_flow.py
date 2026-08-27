@@ -9,11 +9,13 @@ from homeassistant.helpers import selector
 from .const import (
     DOMAIN,
     CONF_BATTERY_NAME,
+    CONF_PRICE_SOURCE, PRICE_SOURCE_SENSOR, PRICE_SOURCE_ZONNEPLAN_API,
     CONF_PRICE_ENTITY, CONF_RETURN_PRICE_FORMULA,
     CONF_CHARGE_ENERGY, CONF_DISCHARGE_ENERGY,
     CONF_CHARGE_POWER, CONF_DISCHARGE_POWER, CONF_MIN_SOC,
     CONF_DISCHARGE_USAGE_POWER, CONF_MIN_PROFIT,
     CONF_ZEN_SOC,
+    DEFAULT_PRICE_SOURCE,
     DEFAULT_CHARGE_ENERGY, DEFAULT_DISCHARGE_ENERGY,
     DEFAULT_CHARGE_POWER, DEFAULT_DISCHARGE_POWER, DEFAULT_MIN_SOC,
     DEFAULT_DISCHARGE_USAGE_POWER, DEFAULT_MIN_PROFIT,
@@ -24,6 +26,11 @@ _SENSOR_SEL     = selector.EntitySelector(selector.EntitySelectorConfig(domain="
 _OPT_SENSOR_SEL = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", multiple=False))
 
 _pos_float = lambda v: vol.All(vol.Coerce(float), vol.Range(min=0.01))
+
+_PRICE_SOURCE_OPTIONS = [
+    selector.SelectOptionDict(value=PRICE_SOURCE_SENSOR,        label="HA sensor entity"),
+    selector.SelectOptionDict(value=PRICE_SOURCE_ZONNEPLAN_API, label="Zonneplan API (quarter-hourly)"),
+]
 
 
 def _validate_formula(formula: str) -> bool:
@@ -36,15 +43,39 @@ def _validate_formula(formula: str) -> bool:
         return False
 
 
-def _price_schema(current_entity: str, current_formula: str) -> vol.Schema:
-    """
-    Schema for the price-sensor step.
-    Uses vol.Required for the formula field so that clearing it saves ""
-    rather than leaving the old value in place.
-    """
+def _price_schema(source: str, current_entity: str, current_formula: str) -> vol.Schema:
+    """Schema for the price step — varies based on source type."""
+    fields: dict = {}
+    if source == PRICE_SOURCE_SENSOR:
+        fields[vol.Required(CONF_PRICE_ENTITY, default=current_entity)] = _SENSOR_SEL
+    fields[vol.Required(CONF_RETURN_PRICE_FORMULA, default=current_formula)] = str
+    return vol.Schema(fields)
+
+
+def _battery_schema(d: dict) -> vol.Schema:
     return vol.Schema({
-        vol.Required(CONF_PRICE_ENTITY, default=current_entity): _SENSOR_SEL,
-        vol.Required(CONF_RETURN_PRICE_FORMULA, default=current_formula): str,
+        vol.Required(CONF_CHARGE_ENERGY,
+            default=d.get(CONF_CHARGE_ENERGY, DEFAULT_CHARGE_ENERGY)):    _pos_float(0),
+        vol.Required(CONF_DISCHARGE_ENERGY,
+            default=d.get(CONF_DISCHARGE_ENERGY, DEFAULT_DISCHARGE_ENERGY)): _pos_float(0),
+        vol.Required(CONF_CHARGE_POWER,
+            default=d.get(CONF_CHARGE_POWER, DEFAULT_CHARGE_POWER)):      _pos_float(0),
+        vol.Required(CONF_DISCHARGE_POWER,
+            default=d.get(CONF_DISCHARGE_POWER, DEFAULT_DISCHARGE_POWER)): _pos_float(0),
+        vol.Required(CONF_MIN_SOC,
+            default=d.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)):
+            vol.All(vol.Coerce(int), vol.Range(min=0, max=50)),
+    })
+
+
+def _schedule_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        vol.Required(CONF_MIN_PROFIT,
+            default=d.get(CONF_MIN_PROFIT, DEFAULT_MIN_PROFIT)):
+            vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
+        vol.Required(CONF_DISCHARGE_USAGE_POWER,
+            default=d.get(CONF_DISCHARGE_USAGE_POWER, DEFAULT_DISCHARGE_USAGE_POWER)):
+            vol.All(vol.Coerce(float), vol.Range(min=0.05, max=10.0)),
     })
 
 
@@ -63,11 +94,10 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not name:
                 errors[CONF_BATTERY_NAME] = "name_empty"
             else:
-                # Use the name as the unique ID so multiple batteries are allowed
                 await self.async_set_unique_id(f"battery_advisor_{name.lower()}")
                 self._abort_if_unique_id_configured()
                 self._data.update(user_input)
-                return await self.async_step_price()
+                return await self.async_step_price_source()
         d = self._data
         return self.async_show_form(
             step_id="user",
@@ -78,10 +108,30 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ── Step 1: Price sensor ──────────────────────────────────────────────────
+    # ── Step 1: Price source ──────────────────────────────────────────────────
+
+    async def async_step_price_source(self, user_input=None):
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_price()
+        d = self._data
+        return self.async_show_form(
+            step_id="price_source",
+            data_schema=vol.Schema({
+                vol.Required(CONF_PRICE_SOURCE,
+                    default=d.get(CONF_PRICE_SOURCE, DEFAULT_PRICE_SOURCE)):
+                    selector.SelectSelector(selector.SelectSelectorConfig(
+                        options=_PRICE_SOURCE_OPTIONS,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )),
+            }),
+        )
+
+    # ── Step 2: Price details ─────────────────────────────────────────────────
 
     async def async_step_price(self, user_input=None):
         errors = {}
+        source = self._data.get(CONF_PRICE_SOURCE, DEFAULT_PRICE_SOURCE)
         if user_input is not None:
             formula = user_input.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)
             if not _validate_formula(formula):
@@ -93,69 +143,46 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="price",
             data_schema=_price_schema(
+                source,
                 d.get(CONF_PRICE_ENTITY, ""),
                 d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA),
             ),
             errors=errors,
         )
 
-    # ── Step 2: Battery ───────────────────────────────────────────────────────
+    # ── Step 3: Battery ───────────────────────────────────────────────────────
 
     async def async_step_battery(self, user_input=None):
         errors = {}
         if user_input is not None:
             self._data.update(user_input)
             return await self.async_step_schedule()
-        d = self._data
         return self.async_show_form(
             step_id="battery",
-            data_schema=vol.Schema({
-                vol.Required(CONF_CHARGE_ENERGY,
-                    default=d.get(CONF_CHARGE_ENERGY, DEFAULT_CHARGE_ENERGY)):    _pos_float(0),
-                vol.Required(CONF_DISCHARGE_ENERGY,
-                    default=d.get(CONF_DISCHARGE_ENERGY, DEFAULT_DISCHARGE_ENERGY)): _pos_float(0),
-                vol.Required(CONF_CHARGE_POWER,
-                    default=d.get(CONF_CHARGE_POWER, DEFAULT_CHARGE_POWER)):      _pos_float(0),
-                vol.Required(CONF_DISCHARGE_POWER,
-                    default=d.get(CONF_DISCHARGE_POWER, DEFAULT_DISCHARGE_POWER)): _pos_float(0),
-                vol.Required(CONF_MIN_SOC,
-                    default=d.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)):
-                    vol.All(vol.Coerce(int), vol.Range(min=0, max=50)),
-            }),
+            data_schema=_battery_schema(self._data),
             errors=errors,
         )
 
-    # ── Step 3: Schedule ──────────────────────────────────────────────────────
+    # ── Step 4: Schedule ──────────────────────────────────────────────────────
 
     async def async_step_schedule(self, user_input=None):
         errors = {}
         if user_input is not None:
             self._data.update(user_input)
             return await self.async_step_soc()
-        d = self._data
         return self.async_show_form(
             step_id="schedule",
-            data_schema=vol.Schema({
-                vol.Required(CONF_MIN_PROFIT,
-                    default=d.get(CONF_MIN_PROFIT, DEFAULT_MIN_PROFIT)):
-                    vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
-                vol.Required(CONF_DISCHARGE_USAGE_POWER,
-                    default=d.get(CONF_DISCHARGE_USAGE_POWER, DEFAULT_DISCHARGE_USAGE_POWER)):
-                    vol.All(vol.Coerce(float), vol.Range(min=0.05, max=10.0)),
-            }),
+            data_schema=_schedule_schema(self._data),
             errors=errors,
         )
 
-    # ── Step 4: Battery SoC (optional) ───────────────────────────────────────
+    # ── Step 5: Battery SoC (optional) ───────────────────────────────────────
 
     async def async_step_soc(self, user_input=None):
         if user_input is not None:
             self._data.update({k: v for k, v in user_input.items() if v})
             name = self._data[CONF_BATTERY_NAME]
-            return self.async_create_entry(
-                title=name,
-                data=self._data,
-            )
+            return self.async_create_entry(title=name, data=self._data)
         d = self._data
         return self.async_show_form(
             step_id="soc",
@@ -172,7 +199,7 @@ class BatteryAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return BatteryAdvisorOptionsFlow(config_entry)
 
 
-# ── Options flow — mirrors setup steps ───────────────────────────────────────
+# ── Options flow ──────────────────────────────────────────────────────────────
 
 class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
 
@@ -184,10 +211,29 @@ class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
         return {**self._config_entry.data, **self._config_entry.options}
 
     async def async_step_init(self, user_input=None):
-        return await self.async_step_price(user_input)
+        return await self.async_step_price_source(user_input)
+
+    async def async_step_price_source(self, user_input=None):
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_price()
+        d = {**self._current(), **self._data}
+        return self.async_show_form(
+            step_id="price_source",
+            data_schema=vol.Schema({
+                vol.Required(CONF_PRICE_SOURCE,
+                    default=d.get(CONF_PRICE_SOURCE, DEFAULT_PRICE_SOURCE)):
+                    selector.SelectSelector(selector.SelectSelectorConfig(
+                        options=_PRICE_SOURCE_OPTIONS,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )),
+            }),
+        )
 
     async def async_step_price(self, user_input=None):
         errors = {}
+        d = {**self._current(), **self._data}
+        source = d.get(CONF_PRICE_SOURCE, DEFAULT_PRICE_SOURCE)
         if user_input is not None:
             formula = user_input.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA)
             if not _validate_formula(formula):
@@ -195,10 +241,10 @@ class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
             else:
                 self._data.update(user_input)
                 return await self.async_step_battery()
-        d = {**self._current(), **self._data}
         return self.async_show_form(
             step_id="price",
             data_schema=_price_schema(
+                source,
                 d.get(CONF_PRICE_ENTITY, ""),
                 d.get(CONF_RETURN_PRICE_FORMULA, DEFAULT_RETURN_PRICE_FORMULA),
             ),
@@ -212,19 +258,7 @@ class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
         d = {**self._current(), **self._data}
         return self.async_show_form(
             step_id="battery",
-            data_schema=vol.Schema({
-                vol.Required(CONF_CHARGE_ENERGY,
-                    default=d.get(CONF_CHARGE_ENERGY, DEFAULT_CHARGE_ENERGY)):    _pos_float(0),
-                vol.Required(CONF_DISCHARGE_ENERGY,
-                    default=d.get(CONF_DISCHARGE_ENERGY, DEFAULT_DISCHARGE_ENERGY)): _pos_float(0),
-                vol.Required(CONF_CHARGE_POWER,
-                    default=d.get(CONF_CHARGE_POWER, DEFAULT_CHARGE_POWER)):      _pos_float(0),
-                vol.Required(CONF_DISCHARGE_POWER,
-                    default=d.get(CONF_DISCHARGE_POWER, DEFAULT_DISCHARGE_POWER)): _pos_float(0),
-                vol.Required(CONF_MIN_SOC,
-                    default=d.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)):
-                    vol.All(vol.Coerce(int), vol.Range(min=0, max=50)),
-            }),
+            data_schema=_battery_schema(d),
         )
 
     async def async_step_schedule(self, user_input=None):
@@ -234,14 +268,7 @@ class BatteryAdvisorOptionsFlow(config_entries.OptionsFlow):
         d = {**self._current(), **self._data}
         return self.async_show_form(
             step_id="schedule",
-            data_schema=vol.Schema({
-                vol.Required(CONF_MIN_PROFIT,
-                    default=d.get(CONF_MIN_PROFIT, DEFAULT_MIN_PROFIT)):
-                    vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
-                vol.Required(CONF_DISCHARGE_USAGE_POWER,
-                    default=d.get(CONF_DISCHARGE_USAGE_POWER, DEFAULT_DISCHARGE_USAGE_POWER)):
-                    vol.All(vol.Coerce(float), vol.Range(min=0.05, max=10.0)),
-            }),
+            data_schema=_schedule_schema(d),
         )
 
     async def async_step_soc(self, user_input=None):

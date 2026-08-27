@@ -5,7 +5,18 @@ DOMAIN = "battery_advisor"
 # ── Battery name ──────────────────────────────────────────────────────────────
 CONF_BATTERY_NAME   = "battery_name"
 
-# ── Price sensor ─────────────────────────────────────────────────────────────
+# ── Price source ──────────────────────────────────────────────────────────────
+CONF_PRICE_SOURCE           = "price_source"
+PRICE_SOURCE_SENSOR         = "sensor"
+PRICE_SOURCE_ZONNEPLAN_API  = "zonneplan_api"
+
+ZONNEPLAN_API_URL_QUARTER = (
+    "https://app-api.zonneplan.nl/api/consumer-prices/charts/electricity-quarter-hourly"
+)
+ZONNEPLAN_API_URL_HOUR = (
+    "https://app-api.zonneplan.nl/api/consumer-prices/charts/electricity-hourly"
+)
+
 CONF_PRICE_ENTITY           = "price_entity_id"
 CONF_RETURN_PRICE_FORMULA   = "return_price_formula"
 
@@ -26,6 +37,7 @@ CONF_MIN_PROFIT     = "min_profit"
 CONF_ZEN_SOC        = "zendure_soc_entity"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
+DEFAULT_PRICE_SOURCE        = PRICE_SOURCE_SENSOR
 DEFAULT_CHARGE_ENERGY       = 7.9    # kWh  (measured)
 DEFAULT_DISCHARGE_ENERGY    = 6.44   # kWh  (measured)
 DEFAULT_CHARGE_POWER        = 2.4    # kW

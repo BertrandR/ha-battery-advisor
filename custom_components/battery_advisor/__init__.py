@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     DOMAIN,
     CONF_BATTERY_NAME,
+    CONF_PRICE_SOURCE, DEFAULT_PRICE_SOURCE,
     CONF_PRICE_ENTITY, CONF_RETURN_PRICE_FORMULA,
     CONF_CHARGE_ENERGY, CONF_DISCHARGE_ENERGY,
     CONF_CHARGE_POWER, CONF_DISCHARGE_POWER, CONF_MIN_SOC,
@@ -31,7 +32,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = BatteryOptimizerCoordinator(
         hass,
         battery_name          = cfg.get(CONF_BATTERY_NAME, "Battery Advisor"),
-        price_entity_id       = cfg[CONF_PRICE_ENTITY],
+        price_source          = cfg.get(CONF_PRICE_SOURCE,          DEFAULT_PRICE_SOURCE),
+        price_entity_id       = cfg.get(CONF_PRICE_ENTITY,          ""),
         charge_energy         = cfg.get(CONF_CHARGE_ENERGY,         DEFAULT_CHARGE_ENERGY),
         discharge_energy      = cfg.get(CONF_DISCHARGE_ENERGY,      DEFAULT_DISCHARGE_ENERGY),
         charge_power          = cfg.get(CONF_CHARGE_POWER,          DEFAULT_CHARGE_POWER),
