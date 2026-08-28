@@ -5,6 +5,7 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -50,7 +51,7 @@ def _apply_return_formula(buy_price_mwh: float, formula: str) -> float:
 # Price extraction
 # ---------------------------------------------------------------------------
 
-def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_FORMULA) -> list[dict]:
+def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_FORMULA, local_tz: ZoneInfo | None = None) -> list[dict]:
     """
     Extract hourly price dicts from a HA state object.
 
@@ -73,10 +74,11 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
     def _slot(dt, buy_mwh, ret_mwh=None, slot_secs=SLOT_SECONDS_HOUR):
         if ret_mwh is None:
             ret_mwh = _apply_return_formula(buy_mwh, return_formula)
+        local = dt.astimezone(local_tz) if local_tz else dt.astimezone()
         return {
             "ts":           dt.timestamp(),
             "datetime":     dt.isoformat(),
-            "hour":         dt.astimezone().strftime("%H:%M"),
+            "hour":         local.strftime("%H:%M"),
             "price":        round(buy_mwh, 2),
             "return_price": round(ret_mwh, 2),
             "slot_seconds": slot_secs,
@@ -221,7 +223,7 @@ def _extract_prices(state_obj: Any, return_formula: str = DEFAULT_RETURN_PRICE_F
         generic = attrs.get(key)
         if generic and isinstance(generic, (list, tuple)):
             if all(isinstance(v, (int, float)) for v in generic if v is not None):
-                midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+                midnight = now.astimezone(local_tz).replace(hour=0, minute=0, second=0, microsecond=0) if local_tz else now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
                 prices = []
                 for i, value in enumerate(generic):
                     if value is None:
@@ -253,7 +255,7 @@ def _to_eur_mwh(value: float, attrs: dict) -> float:
 # Daylight window — HA sun entity
 # ---------------------------------------------------------------------------
 
-def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
+def _is_daylight(hass: HomeAssistant, slot_ts: float, local_tz: ZoneInfo | None = None) -> bool:
     """Return True if slot_ts falls between sunrise and sunset on its calendar day."""
     sun = hass.states.get("sun.sun")
     if sun is not None:
@@ -270,12 +272,10 @@ def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
                 if next_setting.tzinfo is None:
                     next_setting = next_setting.replace(tzinfo=timezone.utc)
 
-                # next_rising and next_setting are the *next* upcoming events from
-                # now, so they may be on different days. Derive the time-of-day only
-                # and check whether slot_dt's local time falls between them.
-                local_slot   = slot_dt.astimezone()
-                local_rising = next_rising.astimezone()
-                local_setting = next_setting.astimezone()
+                tz = local_tz or None
+                local_slot    = slot_dt.astimezone(tz)
+                local_rising  = next_rising.astimezone(tz)
+                local_setting = next_setting.astimezone(tz)
 
                 # Build sunrise and sunset anchored to the slot's local calendar date
                 slot_date = local_slot.date()
@@ -290,7 +290,8 @@ def _is_daylight(hass: HomeAssistant, slot_ts: float) -> bool:
             pass
 
     # Fallback when sun.sun is unavailable
-    local_hour = datetime.fromtimestamp(slot_ts).hour
+    tz = local_tz or timezone.utc
+    local_hour = datetime.fromtimestamp(slot_ts, tz=tz).hour
     return 7 <= local_hour < 20
 
 
@@ -829,7 +830,7 @@ def _annotate_estimated_soc(
 # Zonneplan API price fetching
 # ---------------------------------------------------------------------------
 
-async def _fetch_zonneplan_api(return_formula: str) -> list[dict]:
+async def _fetch_zonneplan_api(return_formula: str, local_tz: ZoneInfo | None = None) -> list[dict]:
     """
     Fetch quarter-hourly prices from the public Zonneplan API.
 
@@ -899,10 +900,11 @@ async def _fetch_zonneplan_api(return_formula: str) -> list[dict]:
                 ret_mwh = float(raw_ret) / 10_000_000 * 1000
             else:
                 ret_mwh = buy_mwh
+            local = dt.astimezone(local_tz) if local_tz else dt.astimezone()
             prices.append({
                 "ts":           dt.timestamp(),
                 "datetime":     dt.isoformat(),
-                "hour":         dt.astimezone().strftime("%H:%M"),
+                "hour":         local.strftime("%H:%M"),
                 "price":        round(buy_mwh, 2),
                 "return_price": round(ret_mwh, 2),
                 "slot_seconds": slot_secs,
@@ -976,10 +978,16 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
         now    = datetime.now(timezone.utc)
         now_ts = now.timestamp()
 
+        # HA-configured local timezone — used for hour display and daylight checks
+        try:
+            local_tz: ZoneInfo | None = ZoneInfo(self.hass.config.time_zone)
+        except Exception:
+            local_tz = None
+
         # 1. Prices
         if self.price_source == PRICE_SOURCE_ZONNEPLAN_API:
             try:
-                prices = await _fetch_zonneplan_api(self._return_price_formula)
+                prices = await _fetch_zonneplan_api(self._return_price_formula, local_tz)
                 if prices:
                     self._cached_api_prices = prices
                     _LOGGER.debug("[%s] Zonneplan API: %d slots fetched", self.battery_name, len(prices))
@@ -1000,12 +1008,12 @@ class BatteryOptimizerCoordinator(DataUpdateCoordinator):
             if state_obj is None:
                 raise UpdateFailed(f"Price sensor '{self.price_entity_id}' not found")
             try:
-                prices = _extract_prices(state_obj, self._return_price_formula)
+                prices = _extract_prices(state_obj, self._return_price_formula, local_tz)
             except ValueError as err:
                 raise UpdateFailed(str(err)) from err
 
         # 2. Daylight mask
-        daylight_mask = [_is_daylight(self.hass, p["ts"]) for p in prices]
+        daylight_mask = [_is_daylight(self.hass, p["ts"], local_tz) for p in prices]
 
         # 3. Live SoC — clamp to [min_soc, 100] since the battery won't go below min_soc
         live_soc = _read_soc(self.hass, self.zen_soc_entity)
